@@ -1,0 +1,121 @@
+#!/bin/bash
+set -Eeuo pipefail
+
+runtime_directory=/run/devkit2023customlinux
+runtime_firmware="$runtime_directory/windows-firmware"
+runtime_provenance="$runtime_firmware/provenance.jsonl"
+firmware_directory=/usr/lib/firmware/qcom/sc8280xp/microsoft/blackrock
+persistent_provenance=/var/lib/devkit2023customlinux/windows-firmware-provenance.jsonl
+driver_validator=/usr/local/libexec/devkit2023customlinux-validate-windows-driver
+error_file="$runtime_directory/display-ready-error"
+complete_file="$runtime_directory/display-ready"
+
+log_progress() {
+    local message="$1"
+    printf '[DevKit2023CustomLinux display] %s\n' "$message" >&2
+    if [[ -c /dev/console ]]; then
+        printf '[DevKit2023CustomLinux display] %s\n' "$message" \
+            > /dev/console 2>/dev/null || true
+    fi
+}
+
+write_status_file() {
+    local destination="$1" content="$2" temporary
+    temporary="$(mktemp "$runtime_directory/.display-status.new.XXXXXX")"
+    printf '%s\n' "$content" > "$temporary"
+    chmod 0644 "$temporary"
+    mv -f -- "$temporary" "$destination"
+}
+
+fail_display() {
+    local message="$1"
+    log_progress "$message"
+    install -d -m 0755 "$runtime_directory"
+    rm -f -- "$complete_file"
+    write_status_file "$error_file" "$message"
+    exit 1
+}
+
+is_devkit2023() {
+    [[ -r /proc/device-tree/compatible ]] &&
+        tr '\0' '\n' < /proc/device-tree/compatible | grep -Fxq 'microsoft,blackrock'
+}
+
+is_live_system() {
+    grep -q 'boot=live' /proc/cmdline
+}
+
+provenance_is_valid() {
+    local directory="$1" manifest="$2"
+    [[ -d "$directory" && ! -L "$directory" ]] || return 1
+    [[ -f "$manifest" && ! -L "$manifest" ]] || return 1
+    [[ "$(stat -c %u "$manifest" 2>/dev/null)" == 0 ]] || return 1
+    [[ "$(stat -c %a "$manifest" 2>/dev/null)" == 600 ]] || return 1
+    timeout 30 "$driver_validator" --verify-provenance \
+        "$directory" "$manifest" >/dev/null 2>&1
+}
+
+firmware_sets_are_valid() {
+    provenance_is_valid "$runtime_firmware" "$runtime_provenance" &&
+        provenance_is_valid "$firmware_directory" "$persistent_provenance" &&
+        cmp -s -- "$runtime_provenance" "$persistent_provenance"
+}
+
+display_card_is_ready() {
+    local card card_name
+    for card in /sys/class/drm/card[0-9]*; do
+        card_name="${card##*/}"
+        [[ "$card_name" =~ ^card[0-9]+$ ]] || continue
+        [[ -e "$card/device/driver/module" ]] || continue
+        [[ "$(readlink -f "$card/device/driver/module" 2>/dev/null)" == /sys/module/msm ]] ||
+            continue
+        [[ -c "/dev/dri/$card_name" ]] && return 0
+    done
+    return 1
+}
+
+check_ready() {
+    [[ -f "$complete_file" && ! -L "$complete_file" ]] || return 1
+    [[ "$(stat -c %u "$complete_file" 2>/dev/null)" == 0 ]] || return 1
+    [[ "$(stat -c %a "$complete_file" 2>/dev/null)" == 644 ]] || return 1
+    is_devkit2023 && firmware_sets_are_valid && display_card_is_ready
+}
+
+main() {
+    local attempt
+    [[ "${EUID:-$(id -u)}" -eq 0 ]] || exit 1
+    if [[ "${1:-}" == --check-ready && "$#" -eq 1 ]]; then
+        check_ready
+        return
+    fi
+    [[ "$#" -eq 0 ]] || exit 2
+    umask 077
+    install -d -m 0755 "$runtime_directory"
+    rm -f -- "$error_file" "$complete_file"
+    trap 'fail_display "The display readiness check was interrupted or timed out. The graphical installer was not started."' TERM INT
+    is_devkit2023 || fail_display 'This image requires a Microsoft Windows Dev Kit 2023.'
+    log_progress 'Checking authenticated target firmware before opening the display.'
+    firmware_sets_are_valid || fail_display \
+        'The display firmware or its provenance is invalid. The graphical installer was not started.'
+    if is_live_system; then
+        [[ ! -f "$runtime_directory/early-display-load-failed" &&
+           -d /sys/module/msm ]] || fail_display \
+            'The Qualcomm display driver was not loaded safely by the initramfs. Late display reprobe is disabled; recreate the USB and retry.'
+    else
+        timeout 30 modprobe msm || fail_display \
+            'The Qualcomm display driver could not be loaded. The graphical installer was not started.'
+    fi
+    log_progress 'Waiting for the Qualcomm DRM display device.'
+    for attempt in $(seq 1 45); do
+        if display_card_is_ready; then
+            write_status_file "$complete_file" \
+                'Authenticated target firmware and the Qualcomm DRM display device are ready.'
+            log_progress 'Display device ready; continuing to KDE.'
+            return 0
+        fi
+        sleep 1
+    done
+    fail_display 'No usable Qualcomm DRM display device appeared. The graphical installer was not started; review the display service journal.'
+}
+
+main "$@"

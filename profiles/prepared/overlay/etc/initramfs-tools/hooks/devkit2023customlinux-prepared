@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "${1:-}" in prereqs) prereqs; exit 0 ;; esac
+. /usr/share/initramfs-tools/hook-functions
+
+# The reusable base deliberately has no target. Its early script stops with
+# preparation instructions. Private preparation adds BOTH authenticated records.
+if [ ! -e /etc/devkit2023customlinux-prepared/target-binding ] &&
+   [ ! -e /etc/devkit2023customlinux-prepared/firmware.sha256 ]; then
+    exit 0
+fi
+
+# The normal firmware hook copies the already authenticated firmware set.
+# This hook adds its target binding/integrity record and required utilities.
+for command in /usr/bin/sha256sum /usr/bin/tr /usr/bin/grep; do
+    copy_exec "$command"
+done
+mkdir -p "$DESTDIR/etc/devkit2023customlinux-prepared"
+for name in target-binding firmware.sha256; do
+    test -f "/etc/devkit2023customlinux-prepared/$name"
+    cp -p "/etc/devkit2023customlinux-prepared/$name" "$DESTDIR/etc/devkit2023customlinux-prepared/$name"
+done

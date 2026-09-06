@@ -1,0 +1,13 @@
+[Unit]
+Description=Validate this Dev Kit's prepared firmware
+After=local-fs.target systemd-udev-trigger.service
+Before=devkit2023customlinux-display-ready.service devkit2023customlinux-audio.service devkit2023customlinux-bluetooth-address.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/devkit2023customlinux-prepared --activate
+TimeoutStartSec=180
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

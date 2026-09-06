@@ -1,0 +1,545 @@
+#!/usr/bin/python3
+"""Validate one Windows DriverStore candidate or an installed provenance set."""
+
+from __future__ import annotations
+
+import datetime
+import hashlib
+import json
+import pathlib
+import re
+import subprocess
+import sys
+from typing import Any
+
+
+OSSLSIGNCODE = pathlib.Path("/usr/local/bin/osslsigncode")
+EXTENSION_CLASS_GUID = "{e2f84ce7-8efa-411c-aa69-97454ca4cb57}"
+DISPLAY_CLASS_GUID = "{4d36e968-e325-11ce-bfc1-08002be10318}"
+RULES: dict[str, dict[str, Any]] = {
+    "qcadsp8280.mbn": {
+        "directory": re.compile(
+            r"surfacepro_ext_adsp8280\.inf_arm64_[0-9a-f]{16}", re.I
+        ),
+        "inf": "surfacepro_ext_adsp8280.inf",
+        "catalog": "surfacepro_ext_adsp8280.cat",
+        "class": "Extension",
+        "class_guid": EXTENSION_CLASS_GUID,
+        "extension_id": "{c86e72ce-012f-4c0c-adcc-c892f9acac8e}",
+        "hardware_id": r"ACPI\VEN_QCOM&DEV_061B&SUBSYS_MSHW0276",
+        "minimum": 8 * 1024 * 1024,
+        "maximum": 32 * 1024 * 1024,
+        "catalog_minimum": 8 * 1024,
+        "catalog_maximum": 1024 * 1024,
+    },
+    "qccdsp8280.mbn": {
+        "directory": re.compile(
+            r"surfacepro_ext_cdsp8280\.inf_arm64_[0-9a-f]{16}", re.I
+        ),
+        "inf": "surfacepro_ext_cdsp8280.inf",
+        "catalog": "surfacepro_ext_cdsp8280.cat",
+        "class": "Extension",
+        "class_guid": EXTENSION_CLASS_GUID,
+        "extension_id": "{18a2a4d2-9125-42ad-aa76-37716dce34c9}",
+        "hardware_id": r"ACPI\VEN_QCOM&DEV_06B0&SUBSYS_MSHW0278",
+        "minimum": 1024 * 1024,
+        "maximum": 16 * 1024 * 1024,
+        "catalog_minimum": 8 * 1024,
+        "catalog_maximum": 1024 * 1024,
+    },
+    "qcdxkmsuc8280.mbn": {
+        "directory": re.compile(r"qcdx8280\.inf_arm64_[0-9a-f]{16}", re.I),
+        "inf": "qcdx8280.inf",
+        "catalog": "qcdx8280.cat",
+        "class": "Display",
+        "class_guid": DISPLAY_CLASS_GUID,
+        "extension_id": "",
+        "hardware_id": r"ACPI\VEN_QCOM&DEV_0636&REV_1823",
+        "minimum": 4 * 1024,
+        "maximum": 1024 * 1024,
+        "catalog_minimum": 64 * 1024,
+        "catalog_maximum": 16 * 1024 * 1024,
+    },
+}
+
+DRIVER_VERSION = re.compile(
+    r"(?im)^\s*DriverVer\s*=\s*(\d{1,2})/(\d{1,2})/(\d{4})"
+    r"\s*,\s*([0-9]+(?:\.[0-9]+){3})\s*(?:;.*)?$"
+)
+CATALOG_FILE = re.compile(
+    r"(?im)^\s*CatalogFile(?:\.[^=\s]+)?\s*=\s*([^\r\n;]+)"
+)
+HEX_SHA256 = re.compile(r"[0-9a-f]{64}")
+SAFE_BASENAME = re.compile(r"[A-Za-z0-9._-]{1,128}")
+PROVENANCE_KEYS = {
+    "catalog",
+    "catalog_sha256",
+    "class",
+    "class_guid",
+    "driver_date",
+    "driver_version",
+    "extension_id",
+    "firmware",
+    "firmware_sha256",
+    "firmware_size",
+    "format",
+    "hardware_id",
+    "inf",
+    "inf_sha256",
+    "package",
+    "source",
+    "trust_bundle_sha256",
+    "verification",
+    "verification_tool",
+}
+
+
+def is_regular_file(path: pathlib.Path) -> bool:
+    return path.is_file() and not path.is_symlink()
+
+
+def sha256_file(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_inf(path: pathlib.Path) -> str:
+    if not is_regular_file(path):
+        raise ValueError("INF is not a regular file")
+    size = path.stat().st_size
+    if not 256 <= size <= 4 * 1024 * 1024:
+        raise ValueError("INF size is outside the accepted range")
+    data = path.read_bytes()
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16")
+    if data.count(b"\x00") > len(data) // 8:
+        return data.decode("utf-16-le")
+    return data.decode("utf-8", errors="strict")
+
+
+def unique_case_insensitive_file(directory: pathlib.Path, name: str) -> pathlib.Path:
+    wanted = name.casefold()
+    matches = [
+        entry
+        for entry in directory.iterdir()
+        if entry.name.casefold() == wanted and is_regular_file(entry)
+    ]
+    if len(matches) != 1:
+        raise ValueError("required package file is missing or ambiguous")
+    return matches[0]
+
+
+def directive_values(text: str, directive: str) -> list[str]:
+    pattern = re.compile(
+        rf"(?im)^\s*{re.escape(directive)}\s*=\s*([^\r\n;]+)"
+    )
+    return [match.group(1).strip().strip('"') for match in pattern.finditer(text)]
+
+
+def require_single_directive(text: str, directive: str, expected: str) -> None:
+    values = directive_values(text, directive)
+    if len(values) != 1 or values[0].casefold() != expected.casefold():
+        raise ValueError(f"unexpected {directive} directive")
+
+
+def arm64_model_hardware_ids(text: str) -> set[str]:
+    current_section = ""
+    hardware_ids: set[str] = set()
+    for raw_line in text.splitlines():
+        line = raw_line.split(";", 1)[0].strip()
+        section = re.fullmatch(r"\[([^]]+)]", line)
+        if section:
+            current_section = section.group(1).casefold()
+            continue
+        if "ntarm64" not in current_section or "=" not in line:
+            continue
+        _left, right = line.split("=", 1)
+        fields = [field.strip().strip('"') for field in right.split(",")]
+        if len(fields) >= 2 and fields[1].casefold().startswith("acpi\\"):
+            hardware_ids.add(fields[1].casefold())
+    return hardware_ids
+
+
+def parse_driver_version(text: str) -> tuple[str, str, str]:
+    matches = list(DRIVER_VERSION.finditer(text))
+    if len(matches) != 1:
+        raise ValueError("DriverVer is missing or ambiguous")
+    match = matches[0]
+    month, day, year = (int(match.group(index)) for index in range(1, 4))
+    date = datetime.date(year, month, day)
+    version_parts = tuple(int(part) for part in match.group(4).split("."))
+    if len(version_parts) != 4 or any(part > 65535 for part in version_parts):
+        raise ValueError("DriverVer version is outside the accepted range")
+    version = ".".join(str(part) for part in version_parts)
+    rank = f"{date:%Y%m%d}-" + ".".join(
+        f"{part:05d}" for part in version_parts
+    )
+    return rank, date.isoformat(), version
+
+
+def osslsigncode_is_214() -> bool:
+    if not is_regular_file(OSSLSIGNCODE):
+        return False
+    result = subprocess.run(
+        [str(OSSLSIGNCODE), "--version"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=10,
+        check=False,
+        text=True,
+        errors="replace",
+    )
+    return result.returncode == 0 and re.search(
+        r"\bosslsigncode\s+2\.14(?:\D|$)", result.stdout, re.I
+    ) is not None
+
+
+def authenticate_catalog(
+    catalog: pathlib.Path, root_bundle: pathlib.Path
+) -> dict[str, list[str]]:
+    result = subprocess.run(
+        [
+            str(OSSLSIGNCODE),
+            "verify",
+            "-verbose",
+            "-in",
+            str(catalog),
+            "-CAfile",
+            str(root_bundle),
+            "-TSA-CAfile",
+            str(root_bundle),
+            "-ignore-crl",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=45,
+        check=False,
+        text=True,
+        errors="strict",
+    )
+    if result.returncode != 0:
+        raise ValueError("catalog authentication failed")
+    if len(result.stdout) > 32 * 1024 * 1024 or len(result.stderr) > 1024 * 1024:
+        raise ValueError("catalog verification output is unexpectedly large")
+
+    return parse_catalog_members(result.stdout)
+
+
+def parse_catalog_members(output: str) -> dict[str, list[str]]:
+    """Read only osslsigncode 2.14's member table, not its signature report.
+
+    The caller must first require successful catalog signature verification.
+    Timestamp countersignatures also contain a 'Hash Algorithm' field, but
+    they are not catalog members. The top-level Signature Index header ends
+    the table. Never relax validation of an incomplete member at that boundary.
+    """
+    members: dict[str, list[str]] = {}
+    in_members = False
+    table_closed = False
+    current_names: list[str] = []
+    current_algorithms: list[str] = []
+    current_digests: list[str] = []
+
+    def finish_member() -> None:
+        nonlocal current_names, current_algorithms, current_digests
+        # 2.14 also lists named CAT records without an indirect-data digest
+        # (including alternate records for the same file). They provide no
+        # SHA-256 evidence and must not be added to the accepted member map.
+        # Each required INF/MBN still needs its own exact verified SHA-256
+        # record in require_catalog_member(). Partial digest fields remain
+        # errors; only entirely digest-less records are ignored.
+        if current_names and not current_algorithms and not current_digests:
+            current_names = []
+            return
+        if current_names or current_algorithms or current_digests:
+            if not (
+                len(current_names) >= 1
+                and len(current_algorithms) == 1
+                and len(current_digests) == 1
+            ):
+                raise ValueError("malformed catalog member block")
+            algorithm = current_algorithms[0].casefold()
+            expected_digest_length = {
+                "sha1": 40,
+                "sha256": 64,
+                "sha384": 96,
+                "sha512": 128,
+            }.get(algorithm)
+            if (
+                expected_digest_length is None
+                or re.fullmatch(
+                    rf"[0-9a-f]{{{expected_digest_length}}}", current_digests[0]
+                )
+                is None
+            ):
+                raise ValueError("malformed catalog member digest")
+            for name in current_names:
+                if len(name) > 4096 or any(ord(character) < 32 for character in name):
+                    raise ValueError("malformed catalog member name")
+                if (
+                    algorithm == "sha256"
+                    and SAFE_BASENAME.fullmatch(name) is not None
+                    and pathlib.PureWindowsPath(name).name == name
+                ):
+                    members.setdefault(name.casefold(), []).append(
+                        current_digests[0]
+                    )
+        current_names = []
+        current_algorithms = []
+        current_digests = []
+
+    for output_line in output.splitlines():
+        stripped = output_line.strip()
+        if stripped == "Catalog members:":
+            if in_members:
+                raise ValueError("duplicate catalog member listing")
+            in_members = True
+            continue
+        if not in_members:
+            continue
+        if re.fullmatch(
+            r"Signature Index: [0-9]+\s+\((?:Primary|Nested) Signature\)", output_line
+        ):
+            finish_member()
+            table_closed = True
+            break
+        if not stripped:
+            finish_member()
+            continue
+        name_match = re.fullmatch(r"File name:\s*(.+)", stripped, re.I)
+        algorithm_match = re.fullmatch(r"Hash algorithm:\s*([A-Za-z0-9_-]+)", stripped, re.I)
+        digest_match = re.fullmatch(
+            r"Message digest:\s*([0-9A-Fa-f]{40,128})", stripped, re.I
+        )
+        if name_match:
+            current_names.append(name_match.group(1).strip())
+        elif algorithm_match:
+            current_algorithms.append(algorithm_match.group(1))
+        elif digest_match:
+            current_digests.append(digest_match.group(1).lower())
+        elif current_names or current_algorithms or current_digests:
+            finish_member()
+    finish_member()
+    if not in_members or not table_closed or not members:
+        raise ValueError("authenticated catalog member listing is absent")
+    return members
+
+
+def require_catalog_member(
+    members: dict[str, list[str]], member: pathlib.Path, expected_name: str
+) -> None:
+    digest = sha256_file(member)
+    listed = members.get(expected_name.casefold(), [])
+    if listed != [digest]:
+        raise ValueError("exact SHA-256 catalog member is absent or ambiguous")
+
+
+def validate_candidate(
+    candidate: pathlib.Path, expected_name: str, root_bundle: pathlib.Path
+) -> tuple[str, dict[str, Any]]:
+    rule = RULES[expected_name]
+    if candidate.name.casefold() != expected_name.casefold():
+        raise ValueError("wrong firmware name")
+    if not is_regular_file(candidate) or candidate.parent.is_symlink():
+        raise ValueError("firmware is not a regular package file")
+    if not rule["directory"].fullmatch(candidate.parent.name):
+        raise ValueError("unexpected DriverStore package directory")
+
+    size = candidate.stat().st_size
+    if not rule["minimum"] <= size <= rule["maximum"]:
+        raise ValueError("firmware size is outside the accepted range")
+    with candidate.open("rb") as stream:
+        header = stream.read(20)
+    if len(header) != 20 or header[:4] != b"\x7fELF" or header[18:20] != b"\xa4\x00":
+        raise ValueError("firmware is not a Qualcomm Hexagon ELF image")
+
+    inf_path = unique_case_insensitive_file(candidate.parent, rule["inf"])
+    text = read_inf(inf_path)
+    require_single_directive(text, "Class", rule["class"])
+    require_single_directive(text, "ClassGuid", rule["class_guid"])
+    if rule["extension_id"]:
+        require_single_directive(text, "ExtensionId", rule["extension_id"])
+    if rule["hardware_id"].casefold() not in arm64_model_hardware_ids(text):
+        raise ValueError("exact ARM64 hardware ID is absent")
+    payload_declaration = re.compile(
+        rf"(?im)^[ \t]*{re.escape(expected_name)}[ \t]*="
+        rf"[ \t]*[^\r\n;]+(?:;[^\r\n]*)?\r?$"
+    )
+    if payload_declaration.search(text) is None:
+        raise ValueError("firmware is not declared by the INF")
+
+    rank, driver_date, driver_version = parse_driver_version(text)
+    catalog_names = [
+        match.group(1).strip().strip('"') for match in CATALOG_FILE.finditer(text)
+    ]
+    if not catalog_names or any(
+        name.casefold() != rule["catalog"].casefold()
+        or SAFE_BASENAME.fullmatch(name) is None
+        or pathlib.PureWindowsPath(name).name != name
+        for name in catalog_names
+    ):
+        raise ValueError("unexpected or unsafe CatalogFile directive")
+    catalog = unique_case_insensitive_file(candidate.parent, rule["catalog"])
+    catalog_size = catalog.stat().st_size
+    if not rule["catalog_minimum"] <= catalog_size <= rule["catalog_maximum"]:
+        raise ValueError("catalog size is outside the accepted range")
+
+    if not is_regular_file(root_bundle) or root_bundle.is_symlink():
+        raise ValueError("trust bundle is not a regular file")
+    if not 512 <= root_bundle.stat().st_size <= 1024 * 1024:
+        raise ValueError("trust bundle size is outside the accepted range")
+    if not osslsigncode_is_214():
+        raise ValueError("osslsigncode 2.14 is required")
+
+    # osslsigncode 2.14 authenticates the CAT itself and emits its signed member
+    # table in verbose mode. Raw INF/MBN input is not a supported Authenticode
+    # format, so require exact filename + SHA-256 pairs from that authenticated
+    # table for both files instead of attempting to verify them as executables.
+    catalog_members = authenticate_catalog(catalog, root_bundle)
+    require_catalog_member(catalog_members, inf_path, rule["inf"])
+    require_catalog_member(catalog_members, candidate, expected_name)
+
+    record: dict[str, Any] = {
+        "catalog": rule["catalog"],
+        "catalog_sha256": sha256_file(catalog),
+        "class": rule["class"],
+        "class_guid": rule["class_guid"],
+        "driver_date": driver_date,
+        "driver_version": driver_version,
+        "extension_id": rule["extension_id"],
+        "firmware": expected_name,
+        "firmware_sha256": sha256_file(candidate),
+        "firmware_size": size,
+        "format": 1,
+        "hardware_id": rule["hardware_id"],
+        "inf": rule["inf"],
+        "inf_sha256": sha256_file(inf_path),
+        "package": candidate.parent.name,
+        "source": "target-windows-driverstore",
+        "trust_bundle_sha256": sha256_file(root_bundle),
+        "verification": "authenticode-catalog-members:inf,firmware",
+        "verification_tool": "osslsigncode-2.14",
+    }
+    return rank, record
+
+
+def unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate provenance key")
+        result[key] = value
+    return result
+
+
+def verify_provenance(firmware_directory: pathlib.Path, manifest: pathlib.Path) -> None:
+    if not firmware_directory.is_dir() or firmware_directory.is_symlink():
+        raise ValueError("firmware directory is invalid")
+    if not is_regular_file(manifest) or not 512 <= manifest.stat().st_size <= 64 * 1024:
+        raise ValueError("provenance manifest is invalid")
+    raw = manifest.read_bytes()
+    if b"\r" in raw or not raw.endswith(b"\n"):
+        raise ValueError("provenance manifest is not canonical")
+    lines = raw.decode("utf-8", errors="strict").splitlines()
+    if len(lines) != len(RULES):
+        raise ValueError("provenance manifest has the wrong record count")
+
+    for expected_name, line in zip(RULES, lines, strict=True):
+        record = json.loads(line, object_pairs_hook=unique_json_object)
+        if not isinstance(record, dict) or set(record) != PROVENANCE_KEYS:
+            raise ValueError("provenance fields are invalid")
+        rule = RULES[expected_name]
+        expected_fields = {
+            "catalog": rule["catalog"],
+            "class": rule["class"],
+            "class_guid": rule["class_guid"],
+            "extension_id": rule["extension_id"],
+            "firmware": expected_name,
+            "format": 1,
+            "hardware_id": rule["hardware_id"],
+            "inf": rule["inf"],
+            "source": "target-windows-driverstore",
+            "verification": "authenticode-catalog-members:inf,firmware",
+            "verification_tool": "osslsigncode-2.14",
+        }
+        if any(record[key] != value for key, value in expected_fields.items()):
+            raise ValueError("provenance identity is invalid")
+        if not isinstance(record["package"], str) or not rule["directory"].fullmatch(
+            record["package"]
+        ):
+            raise ValueError("provenance package is invalid")
+        for key in (
+            "catalog_sha256",
+            "firmware_sha256",
+            "inf_sha256",
+            "trust_bundle_sha256",
+        ):
+            if not isinstance(record[key], str) or HEX_SHA256.fullmatch(record[key]) is None:
+                raise ValueError("provenance digest is invalid")
+        if not isinstance(record["driver_date"], str):
+            raise ValueError("provenance driver date is invalid")
+        datetime.date.fromisoformat(record["driver_date"])
+        if not isinstance(record["driver_version"], str):
+            raise ValueError("provenance driver version is invalid")
+        version_parts = record["driver_version"].split(".")
+        if len(version_parts) != 4 or any(
+            not part.isdigit() or int(part) > 65535 for part in version_parts
+        ):
+            raise ValueError("provenance driver version is invalid")
+
+        firmware = firmware_directory / expected_name
+        if not is_regular_file(firmware):
+            raise ValueError("installed firmware is not a regular file")
+        actual_size = firmware.stat().st_size
+        if (
+            not isinstance(record["firmware_size"], int)
+            or isinstance(record["firmware_size"], bool)
+            or record["firmware_size"] != actual_size
+            or not rule["minimum"] <= actual_size <= rule["maximum"]
+        ):
+            raise ValueError("installed firmware size does not match provenance")
+        with firmware.open("rb") as stream:
+            header = stream.read(20)
+        if len(header) != 20 or header[:4] != b"\x7fELF" or header[18:20] != b"\xa4\x00":
+            raise ValueError("installed firmware structure is invalid")
+        if sha256_file(firmware) != record["firmware_sha256"]:
+            raise ValueError("installed firmware digest does not match provenance")
+
+
+def main() -> int:
+    try:
+        if len(sys.argv) == 4 and sys.argv[1] == "--verify-provenance":
+            verify_provenance(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]))
+            return 0
+        if len(sys.argv) != 4:
+            return 2
+        candidate = pathlib.Path(sys.argv[1])
+        expected_name = sys.argv[2]
+        root_bundle = pathlib.Path(sys.argv[3])
+        if expected_name not in RULES:
+            return 1
+        rank, record = validate_candidate(candidate, expected_name, root_bundle)
+        encoded = json.dumps(record, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        print(f"{rank}\t{encoded}")
+    except (
+        json.JSONDecodeError,
+        OSError,
+        UnicodeError,
+        ValueError,
+        subprocess.SubprocessError,
+    ) as error:
+        # Internal ValueError messages identify the validation stage. Avoid
+        # echoing OS paths, raw catalog text, registry data, or file contents.
+        reason = str(error) if type(error) is ValueError else type(error).__name__
+        print(f"[DevKit2023CustomLinux firmware validation] {reason}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

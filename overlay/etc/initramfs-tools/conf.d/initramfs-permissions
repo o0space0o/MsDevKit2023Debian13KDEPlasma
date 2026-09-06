@@ -1,0 +1,2 @@
+# Keep any encryption key material embedded by the installer root-only.
+UMASK=0077

@@ -1,0 +1,41 @@
+---
+componentName: devkit2023customlinux
+welcomeStyleCalamares: false
+welcomeExpandingLogo: true
+windowExpanding: normal
+windowSize: 800px,580px
+windowPlacement: center
+
+sidebar: widget
+navigation: widget
+
+# Calamares 3.3.14 requires this key. A list selects static images; a scalar
+# filename selects QML. Keep the existing logo, without an extra slideshow app.
+slideshow: [ "devkit2023customlinux-logo.svg" ]
+uploadServer:
+    type: none
+
+strings:
+    productName: DevKit2023CustomLinux
+    shortProductName: DevKit2023CustomLinux
+    version: 1.0.0
+    shortVersion: 1.0
+    versionedName: DevKit2023CustomLinux 1.0.0
+    shortVersionedName: DevKit2023CustomLinux 1.0
+    bootloaderEntryName: DevKit2023CustomLinux
+    productUrl: ""
+    supportUrl: ""
+    knownIssuesUrl: ""
+    releaseNotesUrl: ""
+    donateUrl: ""
+
+images:
+    productIcon: devkit2023customlinux-logo.svg
+    productLogo: devkit2023customlinux-logo.svg
+    productWelcome: devkit2023customlinux-logo.svg
+
+style:
+    SidebarBackground: "#101a26"
+    SidebarText: "#e8f1f2"
+    SidebarTextCurrent: "#ffffff"
+    SidebarBackgroundCurrent: "#176d7a"

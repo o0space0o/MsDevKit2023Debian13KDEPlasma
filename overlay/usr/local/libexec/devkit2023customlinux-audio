@@ -1,0 +1,155 @@
+#!/bin/bash
+set -Eeuo pipefail
+
+runtime_directory=/run/devkit2023customlinux
+runtime_firmware="$runtime_directory/windows-firmware"
+runtime_provenance="$runtime_firmware/provenance.jsonl"
+firmware_directory=/usr/lib/firmware/qcom/sc8280xp/microsoft/blackrock
+persistent_provenance=/var/lib/devkit2023customlinux/windows-firmware-provenance.jsonl
+driver_validator=/usr/local/libexec/devkit2023customlinux-validate-windows-driver
+error_file="$runtime_directory/audio-ready-error"
+complete_file="$runtime_directory/audio-ready"
+
+log_progress() {
+    local message="$1"
+    printf '[DevKit2023CustomLinux audio] %s\n' "$message" >&2
+    if [[ -c /dev/console ]]; then
+        printf '[DevKit2023CustomLinux audio] %s\n' "$message" \
+            > /dev/console 2>/dev/null || true
+    fi
+}
+
+write_status_file() {
+    local destination="$1" content="$2" temporary
+    temporary="$(mktemp "$runtime_directory/.audio-status.new.XXXXXX")"
+    printf '%s\n' "$content" > "$temporary"
+    chmod 0644 "$temporary"
+    mv -f -- "$temporary" "$destination"
+}
+
+fail_audio() {
+    local message="$1"
+    log_progress "$message"
+    install -d -m 0755 "$runtime_directory"
+    rm -f -- "$complete_file"
+    write_status_file "$error_file" "$message"
+    exit 1
+}
+
+is_devkit2023() {
+    [[ -r /proc/device-tree/compatible ]] &&
+        tr '\0' '\n' < /proc/device-tree/compatible | grep -Fxq 'microsoft,blackrock'
+}
+
+is_live_system() {
+    grep -q 'boot=live' /proc/cmdline
+}
+
+provenance_is_valid() {
+    local directory="$1" manifest="$2"
+    [[ -d "$directory" && ! -L "$directory" ]] || return 1
+    [[ -f "$manifest" && ! -L "$manifest" ]] || return 1
+    [[ "$(stat -c %u "$manifest" 2>/dev/null)" == 0 ]] || return 1
+    [[ "$(stat -c %a "$manifest" 2>/dev/null)" == 600 ]] || return 1
+    timeout 30 "$driver_validator" --verify-provenance \
+        "$directory" "$manifest" >/dev/null 2>&1
+}
+
+firmware_sets_are_valid() {
+    provenance_is_valid "$runtime_firmware" "$runtime_provenance" &&
+        provenance_is_valid "$firmware_directory" "$persistent_provenance" &&
+        cmp -s -- "$runtime_provenance" "$persistent_provenance"
+}
+
+remoteproc_is_ready() {
+    local expected_compatible="$1" expected_firmware="$2" remoteproc
+    for remoteproc in /sys/class/remoteproc/remoteproc[0-9]*; do
+        [[ -r "$remoteproc/device/of_node/compatible" ]] || continue
+        tr '\0' '\n' < "$remoteproc/device/of_node/compatible" |
+            grep -Fxq "$expected_compatible" || continue
+        [[ "$(readlink -f "$remoteproc/device/driver/module" 2>/dev/null)" == /sys/module/qcom_q6v5_pas ]] ||
+            continue
+        [[ "$(cat "$remoteproc/firmware" 2>/dev/null)" == "$expected_firmware" ]] || continue
+        [[ "$(cat "$remoteproc/state" 2>/dev/null)" == running ]] && return 0
+    done
+    return 1
+}
+
+sound_card_is_ready() {
+    local card card_name card_index
+    for card in /sys/class/sound/card[0-9]*; do
+        card_name="${card##*/}"
+        [[ "$card_name" =~ ^card([0-9]+)$ ]] || continue
+        card_index="${BASH_REMATCH[1]}"
+        [[ -e "$card/device/driver/module" ]] || continue
+        [[ "$(readlink -f "$card/device/driver/module" 2>/dev/null)" == /sys/module/snd_soc_sc8280xp ]] ||
+            continue
+        [[ -c "/dev/snd/controlC$card_index" ]] && return 0
+    done
+    return 1
+}
+
+audio_devices_are_ready() {
+    remoteproc_is_ready qcom,sc8280xp-adsp-pas \
+        qcom/sc8280xp/microsoft/blackrock/qcadsp8280.mbn &&
+        sound_card_is_ready
+}
+
+report_optional_cdsp() {
+    if remoteproc_is_ready qcom,sc8280xp-nsp0-pas \
+        qcom/sc8280xp/microsoft/blackrock/qccdsp8280.mbn; then
+        log_progress 'CDSP is also running; optional compute functionality is not validated by this check.'
+    else
+        log_progress 'CDSP is not running. It is not required for DisplayPort audio and does not block this release path.'
+    fi
+}
+
+check_ready() {
+    [[ -f "$complete_file" && ! -L "$complete_file" ]] || return 1
+    [[ "$(stat -c %u "$complete_file" 2>/dev/null)" == 0 ]] || return 1
+    [[ "$(stat -c %a "$complete_file" 2>/dev/null)" == 644 ]] || return 1
+    is_devkit2023 && firmware_sets_are_valid && audio_devices_are_ready
+}
+
+main() {
+    local attempt module
+    [[ "${EUID:-$(id -u)}" -eq 0 ]] || exit 1
+    if [[ "${1:-}" == --check-ready && "$#" -eq 1 ]]; then
+        check_ready
+        return
+    fi
+    [[ "$#" -eq 0 ]] || exit 2
+    umask 077
+    install -d -m 0755 "$runtime_directory"
+    rm -f -- "$error_file" "$complete_file"
+    trap 'fail_audio "The audio readiness check was interrupted or timed out. This does not stop display startup, but installation cannot continue."' TERM INT
+    is_devkit2023 || fail_audio 'This image requires a Microsoft Windows Dev Kit 2023.'
+    log_progress 'Checking authenticated target firmware for ADSP and audio.'
+    firmware_sets_are_valid || fail_audio \
+        'The audio firmware or its provenance is invalid. This does not stop display startup, but installation cannot continue.'
+    if is_live_system; then
+        for module in qcom_q6v5_pas snd_soc_sc8280xp; do
+            [[ -d "/sys/module/$module" ]] || fail_audio \
+                'A required ADSP or audio driver was not loaded safely by the initramfs. This does not stop display startup, but installation cannot continue.'
+        done
+    else
+        for module in qcom_q6v5_pas snd_soc_sc8280xp; do
+            timeout 30 modprobe "$module" || fail_audio \
+                'A required ADSP or audio driver could not be loaded. This does not stop display startup, but installation cannot continue.'
+        done
+    fi
+    log_progress 'Waiting for ADSP and the Blackrock sound card.'
+    for attempt in $(seq 1 60); do
+        if audio_devices_are_ready; then
+            write_status_file "$complete_file" \
+                'Authenticated target firmware, ADSP and the Blackrock sound card are ready.'
+            log_progress 'ADSP and the Blackrock sound card are ready.'
+            report_optional_cdsp
+            return 0
+        fi
+        sleep 1
+    done
+    fail_audio 'ADSP or the Blackrock sound card did not become ready. This does not stop display startup, but installation cannot continue; review the audio service journal.'
+}
+
+main "$@"

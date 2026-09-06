@@ -1,0 +1,6 @@
+#!/bin/sh
+# Read-only hardware and Windows-preserving free-space plan.
+set -eu
+[ "$(id -u)" -eq 0 ] || exit 1
+install -d -m 0755 /run/devkit2023customlinux
+exec /usr/local/libexec/devkit2023customlinux-install-storage capture

@@ -1,0 +1,29 @@
+name: Build target-free base (maintainers only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    env:
+      CLEAN_AFTER_STAGE: "1"
+      DEVKIT2023_ARTIFACT_ROOT: /tmp/DevKit2023CustomLinux-artifacts
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install build dependencies
+        run: sudo bash scripts/install-build-deps.sh
+      - name: Build and verify ISO
+        run: sudo --preserve-env=DEVKIT2023_ARTIFACT_ROOT bash build.sh
+      # No private target material is available in CI. This is NOT a boot-ready kit ISO.
+      - name: Upload target-free base ISO only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: DevKit2023CustomLinux-public-base-${{ github.run_number }}
+          path: /tmp/DevKit2023CustomLinux-artifacts/iso/*.iso
+          if-no-files-found: error
+          compression-level: 0

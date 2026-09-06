@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Install DevKit2023CustomLinux
+Comment=Install DevKit2023CustomLinux alongside the preinstalled Windows system
+Exec=/usr/local/bin/devkit2023customlinux-installer
+TryExec=/usr/local/bin/devkit2023customlinux-installer
+Icon=/etc/calamares/branding/devkit2023customlinux/devkit2023customlinux-logo.svg
+Terminal=false
+Categories=Qt;System;
+Keywords=calamares;system;install;dual-boot;Windows;installer;
+StartupWMClass=calamares
+StartupNotify=true

@@ -1,0 +1,451 @@
+#!/usr/bin/python3
+"""Portable read-only Linux diagnostics. No imports from the installed product."""
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+import ipaddress
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from urllib.parse import unquote, urlsplit
+
+VERSION = '1.4'
+SERVICES = tuple('devkit2023customlinux-' + name + '.service' for name in (
+    'prepared', 'audio', 'display-ready', 'bluetooth-address')) + (
+    'bluetooth.service', 'sddm.service')
+KERNEL_FILTER = re.compile(
+    r'bluetooth|hci[0-9]|qca|rfkill|firmware|remoteproc|q6|adsp|apr|gpr|'
+    r'audioreach|snd|alsa|asoc|audio|dsp|msm|drm|defer|clk|interconnect', re.I)
+LIMIT = 80000
+PROGRESS = None
+
+
+class DesktopUI:
+    """Native KDE dialogs; the diagnostic collector remains unprivileged."""
+    def __init__(self):
+        self.reference = []
+
+    def dialog(self, *args, timeout=300):
+        return subprocess.run(['/usr/bin/kdialog', '--title', 'DevKit2023CustomLinux Diagnostics',
+                               *args], capture_output=True, text=True, timeout=timeout)
+
+    def begin(self):
+        result = self.dialog('--yes-label', 'Create report', '--no-label', 'Cancel', '--yesno',
+            'Create a diagnostic report for this Linux session?\n\n'
+            'Checks audio, Bluetooth, display, firmware and startup logs.\n'
+            'Does not change settings, access Windows, pair devices or play sounds.\n\n'
+            'Common identifiers are redacted. Nothing is uploaded automatically.\n'
+            'The report is saved beside this launcher. System logs may require authorization.')
+        if result.returncode != 0:
+            return False
+        result = self.dialog('--progressbar', 'Preparing diagnostic report…', '0', timeout=10)
+        reference = result.stdout.strip().split()
+        if len(reference) == 2 and reference[0].startswith(('org.kde.', ':')) and reference[1].startswith('/'):
+            self.reference = reference
+        return True
+
+    def update(self, text):
+        if self.reference:
+            try:
+                subprocess.run(['/usr/bin/qdbus6', *self.reference, 'setLabelText', text],
+                               capture_output=True, timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+    def close(self):
+        if self.reference:
+            try:
+                subprocess.run(['/usr/bin/qdbus6', *self.reference, 'close'],
+                               capture_output=True, timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            self.reference = []
+
+    def finished(self, output, partial):
+        self.close()
+        state = 'Report saved (some system logs were unavailable).' if partial else 'Report saved.'
+        result = self.dialog('--yes-label', 'View report', '--no-label', 'Close', '--yesno',
+            state + '\n\n' + str(output) + '\n\n'
+            'Copy this text file before restarting the live desktop.\n'
+            'Review it before sharing publicly. This is a snapshot, not a hardware certification.\n\n'
+            'Would you like to view it now?')
+        if result.returncode == 0:
+            self.dialog('--textbox', str(output), '1000', '700', timeout=3600)
+
+
+def report_folder(launcher):
+    if launcher:
+        parts = urlsplit(str(launcher))
+        if parts.scheme not in ('', 'file') or parts.netloc not in ('', 'localhost'):
+            raise ValueError('The launcher must be a local file')
+        folder = Path(unquote(parts.path)).resolve().parent
+        if str(folder) not in ('/usr/share/applications', '/usr/local/share/applications'):
+            return folder
+    # Application-menu launchers are read-only system files: use the user's Desktop.
+    try:
+        result = subprocess.run(['xdg-user-dir', 'DESKTOP'], capture_output=True, text=True, timeout=3)
+        folder = Path(result.stdout.strip())
+        if result.returncode == 0 and folder.is_absolute() and folder.is_dir():
+            return folder
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    folder = Path.home() / 'Desktop'
+    folder.mkdir(exist_ok=True)
+    return folder
+
+
+def redact(text):
+    """Conservative common-identifier redaction, not a guarantee of anonymity."""
+    text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', str(text))
+    text = re.sub(r'(?i)(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}', '[ADDRESS]', text)
+    text = re.sub(r'(?i)\benx[0-9a-f]{12}\b', 'enx[ADDRESS]', text)
+    text = re.sub(r'(?i)\b[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\b', '[UUID]', text)
+    text = re.sub(r'(?i)\b[0-9a-f]{32,128}\b', '[LONG-HEX]', text)
+    text = re.sub(r'(?i)\b(?:UUID|PARTUUID|live-config.hostname|hostname)=\S+', '[IDENTIFIER]', text)
+    text = re.sub(r'(?<![\w/])/(?:home/[^/\s]+|root)(?=/|\s|$)(?:/[^\s\"\']*)?', '[HOME-PATH]', text)
+    text = re.sub(r'(?i)[A-Z]:[\\/]Users[\\/][^\s\"\']+', '[PROFILE-PATH]', text)
+    text = re.sub(r'(?im)^([ \t]*(?:Name|Alias|name|short name|monitor_name|serial|ssid|'
+                  r'device\.serial|device\.alias|node\.nick|User Name|Host Name)[ \t]*[:=]).*',
+                  r'\1 [REDACTED]', text)
+    text = re.sub(r'MicrosoftCorporation-WindowsDevKit2023-[^\s\"\']+',
+                  'MicrosoftCorporation-WindowsDevKit2023-[IDENTIFIER]', text)
+    text = re.sub(r'(?m)^(Controller \[ADDRESS\]).*', r'\1 [NAME REDACTED]', text)
+    text = re.sub(r'(?m)^([ \t]*(?:name|short name|monitor_name|serial)[ \t]+)[^\n]*',
+                  r'\1[REDACTED]', text)
+    def address(match):
+        value = match.group(0)
+        try:
+            ipaddress.ip_address(value.split('%')[0])
+            return '[IP]'
+        except ValueError:
+            return value
+    text = re.sub(r'(?<![\w.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![\w.-])', address, text)
+    text = re.sub(r'(?<![\w:])[0-9a-fA-F:]*:[0-9a-fA-F:]+(?:%\w+)?', address, text)
+    return text
+
+
+def omit_eld_bytes(text):
+    """Keep mixer routing but omit raw ELD byte arrays encoding monitor names."""
+    blocks = re.split(r'(?=^numid=)', text, flags=re.M)
+    return ''.join('[Raw ELD mixer bytes omitted; decoded ELD is collected separately]\n'
+                   if re.search(r"^numid=.*name='ELD'", block) else block for block in blocks)
+
+
+class Collector:
+    def __init__(self, seconds=110):
+        self.deadline = time.monotonic() + seconds
+        self.parts = []
+
+    def add(self, title, text):
+        if PROGRESS:
+            PROGRESS.update('Collecting: ' + title + '\nNo settings are being changed.')
+        value = redact(text)
+        if len(value) > LIMIT:
+            value = '[TRUNCATED: showing last ' + str(LIMIT) + ' characters]\n' + value[-LIMIT:]
+        self.parts.append('\n=== ' + title + ' ===\n' + value)
+
+    def command(self, title, *args, filter_lines=None, transform=None, timeout=7):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            self.add(title, 'NOT COLLECTED: time budget exhausted')
+            return
+        executable = shutil.which(args[0], path='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')
+        if not executable:
+            self.add(title, 'NOT AVAILABLE: ' + args[0])
+            return
+        # Preserve the user's DBus/PipeWire environment, but avoid localized parsers/pagers.
+        env = {**os.environ, 'LC_ALL': 'C', 'PAGER': 'cat', 'SYSTEMD_PAGER': 'cat',
+               'SYSTEMD_COLORS': '0', 'PYTHONDONTWRITEBYTECODE': '1'}
+        def filtered(output):
+            if transform:
+                output = transform(output)
+            if filter_lines:
+                output = '\n'.join(line for line in output.splitlines() if filter_lines.search(line))
+            return output
+        try:
+            result = subprocess.run([executable, *args[1:]], capture_output=True,
+                                    text=True, errors='replace', env=env,
+                                    timeout=min(timeout, remaining), input='')
+            # BlueZ's noninteractive shell needs pollable stdin. input='' creates
+            # an empty pipe; DEVNULL prevents its command from being dispatched.
+            output = filtered(result.stdout + result.stderr)
+            self.add(title, 'Exit: ' + str(result.returncode) + '\n' + output)
+        except subprocess.TimeoutExpired as error:
+            def decode(value):
+                return value.decode('utf-8', 'replace') if isinstance(value, bytes) else (value or '')
+            partial = filtered(decode(error.stdout) + decode(error.stderr))
+            self.add(title, 'TIMED OUT (read-only query; collection continues)\n' + partial)
+        except OSError as error:
+            self.add(title, 'UNAVAILABLE: ' + str(error))
+
+    def read(self, path):
+        try:
+            with Path(path).open('rb') as stream:
+                value = stream.read(20000).replace(b'\0', b'\n').decode('utf-8', 'replace')
+            self.add(str(path), value)
+        except OSError as error:
+            self.add(str(path), 'UNAVAILABLE: ' + str(error))
+
+    def output(self):
+        return '\n'.join(self.parts) + '\n'
+
+
+def device_state(report):
+    for name in ('/proc/cmdline', '/proc/asound/cards', '/proc/asound/pcm',
+                 '/sys/firmware/devicetree/base/model'):
+        report.read(name)
+    for module in ('msm', 'qcom_q6v5_pas', 'snd_soc_sc8280xp', 'snd_q6apm',
+                   'hci_uart', 'btqca', 'ath11k_pci'):
+        report.add('Module ' + module, 'present=' + str(Path('/sys/module', module).is_dir()))
+    for flag in ('prepared-ready', 'display-ready', 'audio-ready', 'bluetooth-ready'):
+        report.add('Readiness ' + flag, 'exists=' + str(Path('/run/devkit2023customlinux', flag).exists()))
+    for category, glob, attributes in (
+        ('remoteproc', 'remoteproc[0-9]*', ('name', 'state', 'firmware')),
+        ('drm', 'card*-*', ('status', 'enabled', 'modes')),
+        ('bluetooth', 'hci[0-9]*', ()),
+    ):
+        paths = sorted(Path('/sys/class', category).glob(glob))[:16]
+        report.add(category + ' devices', '\n'.join(p.name for p in paths) or 'none')
+        for path in paths:
+            for attribute in attributes:
+                report.read(path / attribute)
+            if category == 'bluetooth':
+                # Enumerate attribute names only; never assume an address attribute exists.
+                report.add(str(path) + ' attributes', '\n'.join(sorted(p.name for p in path.iterdir())))
+                node = (path / 'device').resolve()
+                for ancestor in (node, *node.parents):
+                    if (ancestor / 'of_node/compatible').is_file():
+                        report.read(ancestor / 'of_node/compatible')
+    for path in sorted(Path('/proc/asound').glob('card*/eld*'))[:12]:
+        report.read(path)
+    for path in sorted(Path('/sys/class/rfkill').glob('rfkill[0-9]*'))[:8]:
+        for attribute in ('type', 'soft', 'hard'):
+            report.read(path / attribute)
+    firmware = Path('/usr/lib/firmware')
+    names = ['qcom/sc8280xp/microsoft/blackrock/' + name for name in (
+        'qcadsp8280.mbn', 'qccdsp8280.mbn', 'qcdxkmsuc8280.mbn',
+        'SC8280XP-MICROSOFT-BLACKROCK-tplg.bin')]
+    names += ['qcom/sc8280xp/SC8280XP-MICROSOFT-BLACKROCK-tplg.bin',
+              'qca/hpbtfw21.tlv', 'qca/hpnv21b.bin', 'qca/hpnv21g.bin',
+              'qca/wcnhpbtfw21.tlv', 'qca/wcnhpnv21b.bin', 'qca/wcnhpnv21g.bin']
+    for name in names:
+        path = firmware / name
+        try:
+            value = 'exists=' + str(path.is_file())
+            if path.is_file():
+                value += '; bytes=' + str(path.stat().st_size)
+            report.add('Firmware ' + name, value)
+        except OSError as error:
+            report.add('Firmware ' + name, str(error))
+    for name in ('Blackrock-HiFi.conf', 'microsoft-blackrock.conf', 'sc8280xp.conf'):
+        report.read(Path('/usr/share/alsa/ucm2/Qualcomm/sc8280xp', name))
+
+
+def collect_user():
+    report = Collector(seconds=100)
+    # Launcher logs are private local files. Include only technical startup
+    # failures, not Calamares's account/configuration or disk-plan debug output.
+    logs = sorted((Path.home() / '.local/state/devkit2023customlinux').glob('installer-*.log'),
+                  key=lambda path: path.stat().st_mtime, reverse=True)[:1]
+    for path in logs:
+        installer_failures(report, path)
+    report.command('Kernel release', 'uname', '-r')
+    report.command('Architecture', 'uname', '-m')
+    report.command('PCI drivers', 'lspci', '-nnk')
+    report.command('USB devices (no serial dump)', 'lsusb')
+    report.command('Network link state (no Wi-Fi names)', 'ip', '-brief', 'link')
+    report.command('Storage layout (no UUIDs or labels)', 'lsblk', '-o', 'NAME,TYPE,SIZE,FSTYPE,RO,MOUNTPOINTS')
+    device_state(report)
+    report.command('Package versions', 'dpkg-query', '-W',
+                   '-f=${binary:Package}\t${Version}\n', 'bluez', 'alsa-utils',
+                   'alsa-ucm-conf', 'pipewire', 'wireplumber', 'libspa-0.2-bluetooth',
+                   'firmware-qcom-soc', 'firmware-atheros', 'linux-image-*')
+    report.command('User audio services', 'systemctl', '--user', '--no-pager', 'show',
+                   'pipewire.service', 'pipewire-pulse.service', 'wireplumber.service',
+                   '-p', 'Id,LoadState,ActiveState,SubState,Result,ExecMainStatus')
+    report.command('PipeWire card routing', 'pactl', 'list', 'cards')
+    report.command('PipeWire sinks', 'pactl', 'list', 'sinks')
+    report.command('Default output', 'pactl', 'get-default-sink')
+    # WirePlumber is already installed; do not require PulseAudio utilities just
+    # to inspect the default output. Only technical properties, never nicknames.
+    report.command('WirePlumber default output', 'wpctl', 'inspect', '@DEFAULT_AUDIO_SINK@',
+                   filter_lines=re.compile(r'^id |^[ \t*]*(?:api\.alsa\.(?:card|path|pcm\.(?:card|device))|'
+                                           r'device\.(?:id|api|profile\.name)|media\.class|node\.driver)[ \t]*='))
+    report.command('WirePlumber default volume', 'wpctl', 'get-volume', '@DEFAULT_AUDIO_SINK@')
+    report.command('ALSA hardware', 'aplay', '-l')
+    report.command('ALSA UCM cards', 'alsaucm', 'listcards')
+    cards = sorted(Path('/proc/asound').glob('card[0-9]*'))[:4]
+    for card in cards:
+        index = card.name[4:]
+        if index.isdecimal():
+            report.command('ALSA mixer card ' + index, 'amixer', '-c', index, 'contents',
+                           transform=omit_eld_bytes)
+    report.command('User audio log', 'journalctl', '--user', '-b', '--no-pager', '--no-hostname',
+                   '-o', 'short-monotonic', '-n', '180', '-u', 'pipewire.service',
+                   '-u', 'pipewire-pulse.service', '-u', 'wireplumber.service')
+    return report.output()
+
+
+def collect_privileged():
+    report = Collector(seconds=80)
+    if os.geteuid() != 0:
+        report.add('Privileged collection', 'NOT COLLECTED: root authorization unavailable')
+        return report.output()
+    report.command('Product and Bluetooth services', 'systemctl', '--no-pager', 'show',
+                   *SERVICES, '-p', 'Id,LoadState,ActiveState,SubState,Result,ExecMainStatus')
+    for name in ('audio-ready-error', 'display-ready-error', 'install-preflight-error'):
+        report.read(Path('/run/devkit2023customlinux', name))
+    installer_failures(report, Path('/root/.cache/calamares/session.log'))
+    unit_args = [arg for unit in SERVICES for arg in ('-u', unit)]
+    report.command('Product service log', 'journalctl', '-b', '--no-pager', '--no-hostname',
+                   '-o', 'short-monotonic', '-n', '400', *unit_args)
+    report.command('Relevant kernel log', 'journalctl', '-k', '-b', '--no-pager', '--no-hostname',
+                   '-o', 'short-monotonic', '-n', '2400', filter_lines=KERNEL_FILTER)
+    report.command('Bluetooth controller info', 'btmgmt', 'info')
+    report.command('Bluetooth missing configuration', 'btmgmt', 'config')
+    for controller in sorted(Path('/sys/class/bluetooth').glob('hci[0-9]*'))[:8]:
+        index = controller.name[3:]
+        if index.isdecimal():
+            report.command('Controller-specific ' + controller.name, 'btmgmt', '--index', index, 'info')
+    report.command('Bluetooth DBus controller', 'bluetoothctl', 'show')
+    report.command('Radio blocks', 'rfkill', 'list')
+    # No controller power/address changes, scans, pairing, service restarts or mixer writes.
+    return report.output()
+
+
+def installer_failures(report, path):
+    """Fixed technical messages only; never include neighboring account data."""
+    try:
+        if path.is_symlink() or not path.is_file():
+            return
+        with path.open('rb') as stream:
+            stream.seek(max(0, path.stat().st_size - LIMIT))
+            value = stream.read(LIMIT).decode('utf-8', errors='replace')
+        patterns = (
+            r'Permission denied',
+            r'Installer startup failure: (?:The installation summary was empty\. No disk changes were started\.|The hardware preflight did not complete\. No disk changes were made\.|The installer could not connect to the desktop display\. No disk changes were started\.|The installation window stopped unexpectedly \(exit [0-9]+\), or authorization was cancelled\.)',
+            r'key not found: [A-Za-z][A-Za-z0-9_-]*',
+            r'ERROR: FATAL in "[^"\n]*branding\.desc"',
+            r'could not connect to display[^\n]*',
+            r'Could not (?:load|find) the Qt platform plugin[^\n]*',
+            r'No authentication agent found[^\n]*',
+            r'Error executing command as another user[^\n]*',
+            r'not authorized[^\n]*',
+            r'(?:Segmentation fault|Aborted)(?: \(core dumped\))?',
+            r'STARTUP: Window now visible and ProgressTreeView populated',
+        )
+        selected = [match.group(0) for line in value.splitlines()
+                    for pattern in patterns if (match := re.search(pattern, line, re.I))]
+        report.add('Installer startup status', '\n'.join(selected) or
+                   'No recognized startup failure in this log. Raw log remains private.')
+    except OSError as error:
+        report.add('Installer startup status', str(error))
+
+
+def elevated_snapshot():
+    child = ['/usr/bin/python3', '-B', str(Path(__file__).resolve()), '--privileged']
+    if os.geteuid() == 0:
+        return collect_privileged()
+    # Live images often already permit password-free sudo. Do not configure it.
+    # This first attempt never prompts; otherwise ask through the desktop agent.
+    if Path('/usr/bin/sudo').is_file():
+        try:
+            result = subprocess.run(['/usr/bin/sudo', '-n', *child], capture_output=True,
+                                    text=True, errors='replace', timeout=95,
+                                    stdin=subprocess.DEVNULL)
+            if result.returncode == 0:
+                return result.stdout + result.stderr
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if not Path('/usr/bin/pkexec').is_file():
+        return '\nPrivileged collection unavailable: no password-free sudo or desktop authorization.\n'
+    try:
+        result = subprocess.run(['/usr/bin/pkexec', *child], capture_output=True, text=True,
+                                errors='replace', timeout=150, stdin=subprocess.DEVNULL)
+        output = result.stdout + result.stderr
+        if result.returncode:
+            output += '\nPrivileged collection unavailable/cancelled. Exit: ' + str(result.returncode) + '\n'
+        return output
+    except (OSError, subprocess.TimeoutExpired):
+        return '\nPrivileged authorization/collection unavailable or timed out.\n'
+
+
+def save_report(folder, text):
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%SZ-')
+    descriptor, filename = tempfile.mkstemp(prefix='DevKit2023CustomLinux-report-' + stamp,
+                                          suffix='.txt', dir=folder)
+    # mkstemp creates a new owner-only file; existing files/symlinks are never followed.
+    with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+        stream.write(redact(text))
+    return Path(filename)
+
+
+def main():
+    global PROGRESS
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--launcher')
+    parser.add_argument('--gui', action='store_true', help='show native desktop progress and report viewer')
+    parser.add_argument('--no-admin', action='store_true', help='skip root-only log collection')
+    parser.add_argument('--privileged', action='store_true', help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    if args.privileged:
+        print(collect_privileged(), end='')
+        return 0
+    if sys.platform != 'linux':
+        print('Run this tester inside the Linux live desktop, not Windows.')
+        return 1
+    ui = DesktopUI() if args.gui and Path('/usr/bin/kdialog').is_file() else None
+    if ui and not ui.begin():
+        return 0
+    PROGRESS = ui
+    # Fail before collecting if the copied folder is not writable.
+    try:
+        folder = report_folder(args.launcher)
+        output = save_report(folder, 'Collection started. If interrupted, run the tester again.\n')
+    except (OSError, ValueError) as error:
+        if ui:
+            ui.close()
+            ui.dialog('--error', 'Cannot save the report beside this launcher.\n'
+                      'Copy the launcher to your Desktop and try again.\n\n' + str(error))
+        print('Cannot save beside the launcher. Copy its folder to the live Desktop first.\n' + str(error))
+        return 1
+    print('DevKit2023CustomLinux Diagnostics ' + VERSION, flush=True)
+    print('Read-only collection: no sound playback, radio changes, Windows access or installation.\n'
+          'An authorization prompt may appear for system logs. Cancel for a partial report.\n'
+          'Please leave this window open; collection normally takes 1-3 minutes.', flush=True)
+    header = ('DEVKIT2023CUSTOMLINUX — DIAGNOSTIC REPORT\n' + '=' * 60 + '\n'
+              'Diagnostics version: ' + VERSION + '\n'
+              'UTC: ' + datetime.now(timezone.utc).isoformat() + '\n'
+              'Read-only snapshot, NOT an automatic pass/fail hardware test.\n'
+              'Common identifiers redacted; review before sharing publicly.\n')
+    try:
+        body = header + collect_user()
+    except OSError as error:
+        body = header + '\nDesktop collection incomplete: ' + redact(error) + '\n'
+    # Preserve partial results if authorization or later collection is interrupted.
+    output.write_text(redact(body + '\nPrivileged collection not yet completed.\n'), encoding='utf-8')
+    print('Desktop/audio snapshot collected. Reading startup and Bluetooth logs...', flush=True)
+    if ui:
+        ui.update('Reading startup and Bluetooth logs…\nPlease respond to authorization if prompted.')
+    if args.no_admin:
+        body += '\nPrivileged collection skipped by user.\n'
+    else:
+        body += elevated_snapshot()
+    output.write_text(redact(body + '\nEND OF REPORT\n'), encoding='utf-8')
+    PROGRESS = None
+    if ui:
+        ui.finished(output, 'Privileged collection' in body or 'timed out' in body)
+    print('\nSaved beside the launcher:\n' + str(output) + '\n\n'
+          'Copy this .txt file to your USB and send it back.\n'
+          'A live Desktop may be erased on reboot. You can close this window now.', flush=True)
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

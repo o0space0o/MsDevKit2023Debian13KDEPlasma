@@ -1,0 +1,529 @@
+From nobody Thu Sep  3 10:35:18 2026
+Received: from smtp.kernel.org (aws-us-west-2-korg-mail-1.web.codeaurora.org
+ [10.30.226.201])
+	(using TLSv1.2 with cipher ECDHE-RSA-AES256-GCM-SHA384 (256/256 bits))
+	(No client certificate requested)
+	by smtp.subspace.kernel.org (Postfix) with ESMTPS id 49E3E286415;
+	Tue, 25 Aug 2026 14:07:52 +0000 (UTC)
+Authentication-Results: smtp.subspace.kernel.org;
+ arc=none smtp.client-ip=10.30.226.201
+ARC-Seal: i=1; a=rsa-sha256; d=subspace.kernel.org; s=arc-20240116;
+	t=1787666872; cv=none;
+ b=Jth74qlsIHlxcYTRIIp83Pz6zr6VwORPvXfUlEl6vverOuFIO9URw90/QqiLpBRpFBEk40SO6NjCoHGeAUyYRAgIV9F1qXbdNVNxFnG0Y/lw2mFtPHQOAVw9OLaxGvHIK9flzwVJcfh0kT5+jE1Irt7dogfsj93x3fz1mh0NUjQ=
+ARC-Message-Signature: i=1; a=rsa-sha256; d=subspace.kernel.org;
+	s=arc-20240116; t=1787666872; c=relaxed/simple;
+	bh=AIFE2br+zYY2Ar9yxGhqxB+RZZ2+luv1OamHf/d9Cxw=;
+	h=From:Date:Subject:MIME-Version:Content-Type:Message-Id:References:
+	 In-Reply-To:To:Cc;
+ b=ol59mkn+9VecscmhXXFO38OaXyVBh+tw+BZdUqH1gY+Sr5dXIB1RVmmGwnHklOh1QFBGQdVK09HYhMCoS/bO+gsbrswEbIYbFuUuur8qc18YReeT6l0nZANY0bYs2E3iQtQZnGbe2ZpMnF1uZtep0IS2dlKozLv65e33LwNP3OE=
+ARC-Authentication-Results: i=1; smtp.subspace.kernel.org;
+ dkim=pass (2048-bit key) header.d=kernel.org header.i=@kernel.org
+ header.b=pc7Cd4pu; arc=none smtp.client-ip=10.30.226.201
+Authentication-Results: smtp.subspace.kernel.org;
+	dkim=pass (2048-bit key) header.d=kernel.org header.i=@kernel.org
+ header.b="pc7Cd4pu"
+Received: by smtp.kernel.org (Postfix) with ESMTPS id F080CC2BCB8;
+	Tue, 25 Aug 2026 14:07:51 +0000 (UTC)
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/simple; d=kernel.org;
+	s=k20201202; t=1787666872;
+	bh=AIFE2br+zYY2Ar9yxGhqxB+RZZ2+luv1OamHf/d9Cxw=;
+	h=From:Date:Subject:References:In-Reply-To:To:Cc:Reply-To:From;
+	b=pc7Cd4pu5CQTln2u5S4Xz8nAoH5xF8m3uliLmaFIucGgkYVU7EXoRuSq8xrqolodU
+	 AB1BUQlyPjcqiJSoItq2Hjyl7dLoIQwZJaaViGqQykjT61lXQ86GSrD61jsOpe/yfI
+	 p10nShOHHtMDqoYP2gXZV4uq5sbrs5jiQeda5ct8wAXztUN5iJR8p+OQxM3CwA9nkc
+	 vNrGaX/UKk81H4f9zsXvLeAkbbH2IClHfFqIJUPvQLzJXYaDBuL30uf8pmeVYZ3HWB
+	 c0H0M0UG3KGPScxslgAM1+de7yYLlg1Mug7mrv1pA1JtlQRAeRLTyJy1mkCIj1OW+1
+	 bwV9xaSiaT2eQ==
+Received: from aws-us-west-2-korg-lkml-1.web.codeaurora.org
+ (localhost.localdomain [127.0.0.1])
+	by smtp.lore.kernel.org (Postfix) with ESMTP id D04B3C61DB9;
+	Tue, 25 Aug 2026 14:07:51 +0000 (UTC)
+From: Jens Glathe via B4 Relay
+ <devnull+jens.glathe.oldschoolsolutions.biz@kernel.org>
+Date: Tue, 25 Aug 2026 16:07:45 +0200
+Subject: [PATCH v2 1/2] arm64: dts: qcom: sc8280xp-microsoft-blackrock:
+ Replace old sound nodes, enable DisplayPort audio
+Precedence: bulk
+X-Mailing-List: linux-kernel@vger.kernel.org
+List-Id: <linux-kernel.vger.kernel.org>
+List-Subscribe: <mailto:linux-kernel+subscribe@vger.kernel.org>
+List-Unsubscribe: <mailto:linux-kernel+unsubscribe@vger.kernel.org>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+Message-Id: 
+ <20260825-blackrock-audio-v2-1-659cc4724d57@oldschoolsolutions.biz>
+References: 
+ <20260825-blackrock-audio-v2-0-659cc4724d57@oldschoolsolutions.biz>
+In-Reply-To: 
+ <20260825-blackrock-audio-v2-0-659cc4724d57@oldschoolsolutions.biz>
+To: Bjorn Andersson <andersson@kernel.org>,
+ Konrad Dybcio <konradybcio@kernel.org>, Rob Herring <robh@kernel.org>,
+ Krzysztof Kozlowski <krzk+dt@kernel.org>,
+ Conor Dooley <conor+dt@kernel.org>
+Cc: Konrad Dybcio <konrad.dybcio@oss.qualcomm.com>,
+ =?utf-8?q?J=C3=A9r=C3=B4me_de_Bretagne?= <jerome.debretagne@gmail.com>,
+ linux-arm-msm@vger.kernel.org, devicetree@vger.kernel.org,
+ linux-kernel@vger.kernel.org,
+ Jens Glathe <jens.glathe@oldschoolsolutions.biz>
+X-Mailer: b4 0.14.3
+X-Developer-Signature: v=1; a=ed25519-sha256; t=1787666870; l=6514;
+ i=jens.glathe@oldschoolsolutions.biz; s=20240919;
+ h=from:subject:message-id;
+ bh=CdOmTI4YQ6rgBx9azLec66Nt1DW9VSVJREkoJZpOnqQ=;
+ b=QnS04Kt39AUKI80WKUWoqxxKos/2GV4REumEMhPPPuUlylqmeSmhD6kWnTbG2bwp8qHBwgDI6
+ jSXkJXXy6mTA0/YfJYomMDuwZ5QNh5CV77I9dGzb+hWhxCByeZBHA2p
+X-Developer-Key: i=jens.glathe@oldschoolsolutions.biz; a=ed25519;
+ pk=JcRJqJc/y8LsxOlPakALD3juGfOKmFBWtO+GfELMJVg=
+X-Endpoint-Received: by B4 Relay for
+ jens.glathe@oldschoolsolutions.biz/20240919 with auth_id=216
+X-Original-From: Jens Glathe <jens.glathe@oldschoolsolutions.biz>
+Reply-To: jens.glathe@oldschoolsolutions.biz
+
+From: Jens Glathe <jens.glathe@oldschoolsolutions.biz>
+
+The Windows Dev Kit 2023 has no built-in speakers, microphones or
+headphone jack. Likewise the device with the same mainboard, Surface
+Pro 9 5G [1]. The previous WCD938x / WSA / VA sound card definition
+was therefore non-functional.
+
+Replace the unused codec nodes, SoundWire controllers, LPASS macros
+and related pinctrl with DisplayPort DAI links (DP0/DP1/DP2) so that
+audio is available over the DP connectors. Add the required
+sound-name-prefix properties and update the card model name to the
+conventional SC8280XP-MICROSOFT-BLACKROCK form.
+
+[1]: https://support.microsoft.com/en-us/surface/models/surface-pro-9-featu=
+res-and-specs
+
+Fixes: 16a7fed11714 ("arm64: dts: qcom: sc8280xp-blackrock: dt definition f=
+or WDK2023")
+Signed-off-by: Jens Glathe <jens.glathe@oldschoolsolutions.biz>
+Reviewed-by: Konrad Dybcio <konrad.dybcio@oss.qualcomm.com>
+---
+ .../boot/dts/qcom/sc8280xp-microsoft-blackrock.dts | 135 +++--------------=
+----
+ arch/arm64/boot/dts/qcom/sc8280xp.dtsi             |   4 +
+ 2 files changed, 21 insertions(+), 118 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sc8280xp-microsoft-blackrock.dts b/ar=
+ch/arm64/boot/dts/qcom/sc8280xp-microsoft-blackrock.dts
+index 4f4b5f4285ec2..ac22f44020a64 100644
+--- a/arch/arm64/boot/dts/qcom/sc8280xp-microsoft-blackrock.dts
++++ b/arch/arm64/boot/dts/qcom/sc8280xp-microsoft-blackrock.dts
+@@ -28,32 +28,6 @@ aliases {
+ 		serial1 =3D &uart2;
+ 	};
+=20
+-	wcd938x: audio-codec {
+-		compatible =3D "qcom,wcd9380-codec";
+-
+-		pinctrl-0 =3D <&wcd_default>;
+-		pinctrl-names =3D "default";
+-
+-		reset-gpios =3D <&tlmm 106 GPIO_ACTIVE_LOW>;
+-
+-		vdd-buck-supply =3D <&vreg_s10b>;
+-		vdd-rxtx-supply =3D <&vreg_s10b>;
+-		vdd-io-supply =3D <&vreg_s10b>;
+-		vdd-mic-bias-supply =3D <&vreg_bob>;
+-
+-		qcom,micbias1-microvolt =3D <1800000>;
+-		qcom,micbias2-microvolt =3D <1800000>;
+-		qcom,micbias3-microvolt =3D <1800000>;
+-		qcom,micbias4-microvolt =3D <1800000>;
+-		qcom,mbhc-buttons-vthreshold-microvolt =3D <75000 150000 237000 500000 5=
+00000 500000 500000 500000>;
+-		qcom,mbhc-headset-vthreshold-microvolt =3D <1700000>;
+-		qcom,mbhc-headphone-vthreshold-microvolt =3D <50000>;
+-		qcom,rx-device =3D <&wcd_rx>;
+-		qcom,tx-device =3D <&wcd_tx>;
+-
+-		#sound-dai-cells =3D <1>;
+-	};
+-
+ 	dp3_connector: connector {
+ 		compatible =3D "dp-connector";
+ 		label =3D "DP-3";
+@@ -852,23 +826,19 @@ &remoteproc_nsp0 {
+ 	status =3D "okay";
+ };
+=20
+-&rxmacro {
+-	status =3D "okay";
+-};
+-
+ &sound {
+ 	compatible =3D "qcom,sc8280xp-sndcard";
+-	model =3D "microsoft/blackrock";
++	model =3D "SC8280XP-MICROSOFT-BLACKROCK";
+=20
+-	wcd-playback-dai-link {
+-		link-name =3D "WCD Playback";
++	dp0-dai-link {
++		link-name =3D "DP0 Playback";
+=20
+-		cpu {
+-			sound-dai =3D <&q6apmbedai RX_CODEC_DMA_RX_0>;
++		codec {
++			sound-dai =3D <&mdss0_dp0>;
+ 		};
+=20
+-		codec {
+-			sound-dai =3D <&wcd938x 0>, <&swr1 0>, <&rxmacro 0>;
++		cpu {
++			sound-dai =3D <&q6apmbedai DISPLAY_PORT_RX_0>;
+ 		};
+=20
+ 		platform {
+@@ -876,15 +846,15 @@ platform {
+ 		};
+ 	};
+=20
+-	wcd-capture-dai-link {
+-		link-name =3D "WCD Capture";
++	dp1-dai-link {
++		link-name =3D "DP1 Playback";
+=20
+-		cpu {
+-			sound-dai =3D <&q6apmbedai TX_CODEC_DMA_TX_3>;
++		codec {
++			sound-dai =3D <&mdss0_dp1>;
+ 		};
+=20
+-		codec {
+-			sound-dai =3D <&wcd938x 1>, <&swr2 0>, <&txmacro 0>;
++		cpu {
++			sound-dai =3D <&q6apmbedai DISPLAY_PORT_RX_1>;
+ 		};
+=20
+ 		platform {
+@@ -892,67 +862,23 @@ platform {
+ 		};
+ 	};
+=20
+-	wsa-dai-link {
+-		link-name =3D "WSA Playback";
+-
+-		cpu {
+-			sound-dai =3D <&q6apmbedai WSA_CODEC_DMA_RX_0>;
+-		};
++	dp2-dai-link {
++		link-name =3D "DP2 Playback";
+=20
+ 		codec {
+-			sound-dai =3D <&swr0 0>, <&wsamacro 0>;
+-		};
+-
+-		platform {
+-			sound-dai =3D <&q6apm>;
++			sound-dai =3D <&mdss0_dp2>;
+ 		};
+-	};
+-
+-	va-dai-link {
+-		link-name =3D "VA Capture";
+=20
+ 		cpu {
+-			sound-dai =3D <&q6apmbedai VA_CODEC_DMA_TX_0>;
++			sound-dai =3D <&q6apmbedai DISPLAY_PORT_RX_2>;
+ 		};
+=20
+ 		platform {
+ 			sound-dai =3D <&q6apm>;
+ 		};
+-
+-		codec {
+-			sound-dai =3D <&vamacro 0>;
+-		};
+ 	};
+ };
+=20
+-&swr0 {
+-	status =3D "okay";
+-};
+-
+-&swr1 {
+-	status =3D "okay";
+-
+-	wcd_rx: wcd9380-rx@0,4 {
+-		compatible =3D "sdw20217010d00";
+-		reg =3D <0 4>;
+-		qcom,rx-port-mapping =3D <1 2 3 4 5>;
+-	};
+-};
+-
+-&swr2 {
+-	status =3D "okay";
+-
+-	wcd_tx: wcd9380-tx@0,3 {
+-		compatible =3D "sdw20217010d00";
+-		reg =3D <0 3>;
+-		qcom,tx-port-mapping =3D <1 1 2 3>;
+-	};
+-};
+-
+-&txmacro {
+-	status =3D "okay";
+-};
+-
+ &uart2 {
+ 	pinctrl-0 =3D <&uart2_default>;
+ 	pinctrl-names =3D "default";
+@@ -1076,31 +1002,12 @@ &usb_2_qmpphy0 {
+ 	status =3D "okay";
+ };
+=20
+-&vamacro {
+-	pinctrl-0 =3D <&dmic01_default>, <&dmic23_default>;
+-	pinctrl-names =3D "default";
+-
+-	vdd-micb-supply =3D <&vreg_s10b>;
+-
+-	qcom,dmic-sample-rate =3D <4800000>;
+-
+-	status =3D "okay";
+-};
+-
+-&wsamacro {
+-	status =3D "okay";
+-};
+-
+ &xo_board_clk {
+ 	clock-frequency =3D <38400000>;
+ };
+=20
+ /* PINCTRL */
+=20
+-&lpass_tlmm {
+-	status =3D "okay";
+-};
+-
+ &pmc8280_1_gpios {
+ 	misc_3p3_reg_en: misc-3p3-reg-en-state {
+ 		pins =3D "gpio1";
+@@ -1302,14 +1209,6 @@ usb2_en_state: usb2-en-state {
+ 		output-low;
+ 	};
+=20
+-	wcd_default: wcd-default-state {
+-		reset-pins {
+-			pins =3D "gpio106";
+-			function =3D "gpio";
+-			bias-disable;
+-		};
+-	};
+-
+ 	wlan_en: wlan-en-state {
+ 		pins =3D "gpio134";
+ 		function =3D "gpio";
+diff --git a/arch/arm64/boot/dts/qcom/sc8280xp.dtsi b/arch/arm64/boot/dts/q=
+com/sc8280xp.dtsi
+index fbcfd3883bbb4..baca36b151853 100644
+--- a/arch/arm64/boot/dts/qcom/sc8280xp.dtsi
++++ b/arch/arm64/boot/dts/qcom/sc8280xp.dtsi
+@@ -4903,6 +4903,7 @@ mdss0_dp0: displayport-controller@ae90000 {
+ 				phy-names =3D "dp";
+=20
+ 				#sound-dai-cells =3D <0>;
++				sound-name-prefix =3D "DisplayPort0";
+=20
+ 				operating-points-v2 =3D <&mdss0_dp0_opp_table>;
+ 				power-domains =3D <&rpmhpd SC8280XP_MMCX>;
+@@ -5168,6 +5169,7 @@ mdss0_dp1: displayport-controller@ae98000 {
+ 				phy-names =3D "dp";
+=20
+ 				#sound-dai-cells =3D <0>;
++				sound-name-prefix =3D "DisplayPort1";
+=20
+ 				operating-points-v2 =3D <&mdss0_dp1_opp_table>;
+ 				power-domains =3D <&rpmhpd SC8280XP_MMCX>;
+@@ -5252,6 +5254,7 @@ mdss0_dp2: displayport-controller@ae9a000 {
+ 				operating-points-v2 =3D <&mdss0_dp2_opp_table>;
+=20
+ 				#sound-dai-cells =3D <0>;
++				sound-name-prefix =3D "DisplayPort2";
+=20
+ 				status =3D "disabled";
+=20
+@@ -5327,6 +5330,7 @@ mdss0_dp3: displayport-controller@aea0000 {
+ 				operating-points-v2 =3D <&mdss0_dp3_opp_table>;
+=20
+ 				#sound-dai-cells =3D <0>;
++				sound-name-prefix =3D "DisplayPort3";
+=20
+ 				status =3D "disabled";
+=20
+
+--=20
+2.53.0
+From nobody Thu Sep  3 10:35:18 2026
+Received: from smtp.kernel.org (aws-us-west-2-korg-mail-1.web.codeaurora.org
+ [10.30.226.201])
+	(using TLSv1.2 with cipher ECDHE-RSA-AES256-GCM-SHA384 (256/256 bits))
+	(No client certificate requested)
+	by smtp.subspace.kernel.org (Postfix) with ESMTPS id 4A7DA38D6AD;
+	Tue, 25 Aug 2026 14:07:52 +0000 (UTC)
+Authentication-Results: smtp.subspace.kernel.org;
+ arc=none smtp.client-ip=10.30.226.201
+ARC-Seal: i=1; a=rsa-sha256; d=subspace.kernel.org; s=arc-20240116;
+	t=1787666872; cv=none;
+ b=WXbZfJSkegqh6tQRRzb/ppdwMGdfskNUmVMalciaSbrV6NEAfcHmrUl3rGlMxt3tUhFYYKEzGJIK+LmpmOC9Uvr1/gWsxKq5KHER3CdPE4yc7d6+Ckah7IfOCLwujmKXZVUPtnFwE6n7AOSD6v9hAeCAPYBN2WK4rmBKH4mkRkY=
+ARC-Message-Signature: i=1; a=rsa-sha256; d=subspace.kernel.org;
+	s=arc-20240116; t=1787666872; c=relaxed/simple;
+	bh=elVGgbEpwGybCvuf5wv1HaOcw7/CCmdZgx3ztVqtZ80=;
+	h=From:Date:Subject:MIME-Version:Content-Type:Message-Id:References:
+	 In-Reply-To:To:Cc;
+ b=SiXWDExkFo7h4YdKC5fvTIt6WvIEzpHyaOERHVcl0DN+UtwZBIaZlsTrYXf4yCheNuAjI2eA7pPaesG7U6zxZIEB3gKxa2ohmM/tQWKKZYyfW9OHeeCm2Js8Z6hVLo3b6FD4HzdK+zQRVAJXH+XKjjEnxWj2A4sHphZF/f9H9u0=
+ARC-Authentication-Results: i=1; smtp.subspace.kernel.org;
+ dkim=pass (2048-bit key) header.d=kernel.org header.i=@kernel.org
+ header.b=kbBb7Yl0; arc=none smtp.client-ip=10.30.226.201
+Authentication-Results: smtp.subspace.kernel.org;
+	dkim=pass (2048-bit key) header.d=kernel.org header.i=@kernel.org
+ header.b="kbBb7Yl0"
+Received: by smtp.kernel.org (Postfix) with ESMTPS id 0A791C2BCFA;
+	Tue, 25 Aug 2026 14:07:52 +0000 (UTC)
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/simple; d=kernel.org;
+	s=k20201202; t=1787666872;
+	bh=elVGgbEpwGybCvuf5wv1HaOcw7/CCmdZgx3ztVqtZ80=;
+	h=From:Date:Subject:References:In-Reply-To:To:Cc:Reply-To:From;
+	b=kbBb7Yl0qsoNlkGh4nFjxGdqnw/zs5jqyJYu6SBUZdh0U4Gsy78kIeBucfPfObU2w
+	 NFDeh9VVEBh6vOISAihdlnZ/NNNmMaQrb8WCYfBk95IrjyiCXcRI3dzknDJ4yKj2/s
+	 QDykXac8u0oJUEebPj01A88S6LCC9FVz4NI0suDc2YP/TulLDivc49V24i6nMx/rh1
+	 ZXwD+bEzjvaP1rF9+n1uHoN7dCyVVmuaRtdm8w5mCsKjJ4EZn6Xd3oZt7bx+ich6fV
+	 ZN9YFvyrKZgYTCbuZNqwUCINe5tOqQ75jc9fZhkLRF1b8ua4c1Mn64lSk+Ld6vu3af
+	 juU2PddWms/tA==
+Received: from aws-us-west-2-korg-lkml-1.web.codeaurora.org
+ (localhost.localdomain [127.0.0.1])
+	by smtp.lore.kernel.org (Postfix) with ESMTP id DEA1DC61DC2;
+	Tue, 25 Aug 2026 14:07:51 +0000 (UTC)
+From: Jens Glathe via B4 Relay
+ <devnull+jens.glathe.oldschoolsolutions.biz@kernel.org>
+Date: Tue, 25 Aug 2026 16:07:46 +0200
+Subject: [PATCH v2 2/2] arm64: dts: qcom: sc8280xp-microsoft-blackrock:
+ Enable 4-lane DP altmode
+Precedence: bulk
+X-Mailing-List: linux-kernel@vger.kernel.org
+List-Id: <linux-kernel.vger.kernel.org>
+List-Subscribe: <mailto:linux-kernel+subscribe@vger.kernel.org>
+List-Unsubscribe: <mailto:linux-kernel+unsubscribe@vger.kernel.org>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+Message-Id: 
+ <20260825-blackrock-audio-v2-2-659cc4724d57@oldschoolsolutions.biz>
+References: 
+ <20260825-blackrock-audio-v2-0-659cc4724d57@oldschoolsolutions.biz>
+In-Reply-To: 
+ <20260825-blackrock-audio-v2-0-659cc4724d57@oldschoolsolutions.biz>
+To: Bjorn Andersson <andersson@kernel.org>,
+ Konrad Dybcio <konradybcio@kernel.org>, Rob Herring <robh@kernel.org>,
+ Krzysztof Kozlowski <krzk+dt@kernel.org>,
+ Conor Dooley <conor+dt@kernel.org>
+Cc: Konrad Dybcio <konrad.dybcio@oss.qualcomm.com>,
+ =?utf-8?q?J=C3=A9r=C3=B4me_de_Bretagne?= <jerome.debretagne@gmail.com>,
+ linux-arm-msm@vger.kernel.org, devicetree@vger.kernel.org,
+ linux-kernel@vger.kernel.org,
+ Jens Glathe <jens.glathe@oldschoolsolutions.biz>
+X-Mailer: b4 0.14.3
+X-Developer-Signature: v=1; a=ed25519-sha256; t=1787666870; l=2296;
+ i=jens.glathe@oldschoolsolutions.biz; s=20240919;
+ h=from:subject:message-id;
+ bh=UOYmIKEvjesIgzM9RnafIQQv3nkJi5f0ENtDPOfY/KA=;
+ b=Ymt877u44T9QDIPfPY/byASOzTcJmxgEnC7hQ5ZlRYocOj87YaekyznvysD1F846ZCLmXJJ3P
+ WOPRIs/9XbMAm/Ki0gfcQggTlM0SlNndCtJ+4AZzCuWnGspPoKNcVki
+X-Developer-Key: i=jens.glathe@oldschoolsolutions.biz; a=ed25519;
+ pk=JcRJqJc/y8LsxOlPakALD3juGfOKmFBWtO+GfELMJVg=
+X-Endpoint-Received: by B4 Relay for
+ jens.glathe@oldschoolsolutions.biz/20240919 with auth_id=216
+X-Original-From: Jens Glathe <jens.glathe@oldschoolsolutions.biz>
+Reply-To: jens.glathe@oldschoolsolutions.biz
+
+From: Jens Glathe <jens.glathe@oldschoolsolutions.biz>
+
+Allow up to 4 lanes for the DisplayPort links on the USB-C ports and
+the mini-DP connector. Add the standard link-frequencies and move
+data-lanes to the out endpoints where required by the current bindings.
+
+Also enable mode-switch on the QMP combo PHYs so that altmode events
+can reach them.
+
+Reviewed-by: Konrad Dybcio <konrad.dybcio@oss.qualcomm.com>
+Signed-off-by: Jens Glathe <jens.glathe@oldschoolsolutions.biz>
+---
+ arch/arm64/boot/dts/qcom/sc8280xp-microsoft-blackrock.dts | 13 +++++++++--=
+--
+ arch/arm64/boot/dts/qcom/sc8280xp.dtsi                    |  4 ++++
+ 2 files changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sc8280xp-microsoft-blackrock.dts b/ar=
+ch/arm64/boot/dts/qcom/sc8280xp-microsoft-blackrock.dts
+index ac22f44020a64..f5140d3985503 100644
+--- a/arch/arm64/boot/dts/qcom/sc8280xp-microsoft-blackrock.dts
++++ b/arch/arm64/boot/dts/qcom/sc8280xp-microsoft-blackrock.dts
+@@ -563,7 +563,9 @@ &mdss0_dp0 {
+ };
+=20
+ &mdss0_dp0_out {
+-	data-lanes =3D <0 1>;
++	data-lanes =3D <0 1 2 3>;
++
++	link-frequencies =3D /bits/ 64 <1620000000 2700000000 5400000000 81000000=
+00>;
+ 	remote-endpoint =3D <&usb_0_qmpphy_dp_in>;
+ };
+=20
+@@ -572,19 +574,22 @@ &mdss0_dp1 {
+ };
+=20
+ &mdss0_dp1_out {
+-	data-lanes =3D <0 1>;
++	data-lanes =3D <0 1 2 3>;
++	link-frequencies =3D /bits/ 64 <1620000000 2700000000 5400000000 81000000=
+00>;
++
+ 	remote-endpoint =3D <&usb_1_qmpphy_dp_in>;
+ };
+=20
+ &mdss0_dp2 {
+ 	compatible =3D "qcom,sc8280xp-dp";
+=20
+-	data-lanes =3D <0 1 2 3>;
+-
+ 	status =3D "okay";
+ };
+=20
+ &mdss0_dp2_out {
++	data-lanes =3D <0 1 2 3>;
++	link-frequencies =3D /bits/ 64 <1620000000 2700000000 5400000000 81000000=
+00>;
++
+ 	remote-endpoint =3D <&dp1_connector_in>;
+ };
+=20
+diff --git a/arch/arm64/boot/dts/qcom/sc8280xp.dtsi b/arch/arm64/boot/dts/q=
+com/sc8280xp.dtsi
+index baca36b151853..1c8836c1aae63 100644
+--- a/arch/arm64/boot/dts/qcom/sc8280xp.dtsi
++++ b/arch/arm64/boot/dts/qcom/sc8280xp.dtsi
+@@ -3692,6 +3692,8 @@ usb_0_qmpphy: phy@88eb000 {
+ 			#clock-cells =3D <1>;
+ 			#phy-cells =3D <1>;
+=20
++			mode-switch;
++
+ 			status =3D "disabled";
+=20
+ 			ports {
+@@ -3807,6 +3809,8 @@ usb_1_qmpphy: phy@8903000 {
+ 			#clock-cells =3D <1>;
+ 			#phy-cells =3D <1>;
+=20
++			mode-switch;
++
+ 			status =3D "disabled";
+=20
+ 			ports {
+
+--=20
+2.53.0

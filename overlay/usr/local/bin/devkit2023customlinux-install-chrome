@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+set -f
+
+title="DevKit2023CustomLinux"
+
+if command -v google-chrome-stable >/dev/null 2>&1; then
+    exec google-chrome-stable
+fi
+
+message='Download the official Google Chrome ARM64 package and add its signed update repository? An internet connection and administrator authorization are required. Chrome is not bundled with this ISO. Review the Google Chrome terms at https://www.google.com/chrome/terms/ before continuing.'
+if grep -qw 'boot=live' /proc/cmdline; then
+    message="$message\n\nYou are in the live desktop: this browser installation is temporary and disappears when you restart. Install Chrome again after installing Linux."
+fi
+kdialog --title "Install Google Chrome" \
+    --warningyesno "$message" || exit 0
+
+progress="$(kdialog --title 'Install Google Chrome' --progressbar 'Downloading and installing the signed ARM64 package from Google…' 0)"
+close_progress() {
+    # kdialog returns a DBus service and object path, never shell code.
+    if [ -n "$progress" ]; then
+        set -- $progress
+        [ "$#" -eq 2 ] && qdbus6 "$1" "$2" close >/dev/null 2>&1 || true
+        progress=
+    fi
+}
+trap close_progress EXIT INT TERM
+if pkexec /usr/local/libexec/devkit2023customlinux-install-chrome; then
+    close_progress
+    kdialog --title "Install Google Chrome" \
+        --msgbox "Google Chrome was installed from the official Google ARM64 repository."
+else
+    close_progress
+    kdialog --title "Install Google Chrome" \
+        --error "Google Chrome could not be installed. Check the network connection and free space, then try again. If it still fails, open Konsole and run: pkexec /usr/local/libexec/devkit2023customlinux-install-chrome"
+    exit 1
+fi

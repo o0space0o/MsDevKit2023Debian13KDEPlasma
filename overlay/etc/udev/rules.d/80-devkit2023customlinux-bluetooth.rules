@@ -1,0 +1,5 @@
+# Re-run target-local WCN6855 address provisioning whenever an HCI controller
+# is added. The helper itself restricts changes to the built-in Blackrock
+# controller and verifies the exact live controller state before declaring it
+# ready; external USB adapters therefore cannot receive the cached address.
+ACTION=="add", SUBSYSTEM=="bluetooth", KERNEL=="hci*", TAG+="systemd", ENV{SYSTEMD_WANTS}+="devkit2023customlinux-bluetooth-address.service"

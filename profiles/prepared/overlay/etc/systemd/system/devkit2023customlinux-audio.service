@@ -1,0 +1,13 @@
+[Unit]
+Description=Prepare DevKit2023CustomLinux audio
+Requires=devkit2023customlinux-prepared.service
+After=devkit2023customlinux-prepared.service systemd-udev-trigger.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/devkit2023customlinux-audio
+TimeoutStartSec=210
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

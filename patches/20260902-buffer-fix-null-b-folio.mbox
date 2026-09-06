@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Joseph Qi <joseph.qi@linux.alibaba.com>
+Date: Wed, 2 Sep 2026 10:39:46 +0800
+Subject: [PATCH] buffer: fix NULL dereference of bh->b_folio in __bh_submit()
+
+Commit a2c924c240e7 ("buffer: set BIO_COMPLETE_IN_TASK for dropbehind
+writeback") added an unconditional folio_test_dropbehind(bh->b_folio) in
+__bh_submit(). But jbd2 shadow buffers have a NULL b_folio since commit
+5febcba29792 ("jbd2: point the shadow buffer at the frozen data directly")
+made them point b_data at the kmalloced frozen data rather than a folio.
+Submitting such a buffer during journal commit oopses:
+
+  BUG: kernel NULL pointer dereference, address: 0000000000000000
+  RIP: 0010:__bh_submit.constprop.0+0x87/0x120
+  Call Trace:
+   jbd2_journal_commit_transaction+0x932/0x1b10
+   kjournald2+0xb2/0x250
+
+Hit by the ocfs2-testsuite fill_verify_holes test running with
+data=writeback.
+
+Dropbehind only applies to buffers backed by a folio, so skip the check
+when b_folio is NULL.
+
+Fixes: 5febcba29792 ("jbd2: point the shadow buffer at the frozen data directly")
+Tested-by: Srikanth Aithal <Srikanth.Aithal@oracle.com>
+Tested-by: Luca Weiss <luca.weiss@fairphone.com> # sm7225-fairphone-fp4
+Reviewed-by: Jan Kara <jack@suse.cz>
+Signed-off-by: Joseph Qi <joseph.qi@linux.alibaba.com>
+Link: https://lkml.iu.edu/2609.0/02958.html
+---
+ fs/buffer.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/fs/buffer.c b/fs/buffer.c
+index 427d8a817cd5..f46fa6413032 100644
+--- a/fs/buffer.c
++++ b/fs/buffer.c
+@@ -1106,7 +1106,8 @@ static void __bh_submit(struct buffer_head *bh, blk_opf_t opf,
+ 
+ 	bio = bio_alloc(bh->b_bdev, 1, opf, GFP_NOIO);
+ 
+-	if (folio_test_dropbehind(bh->b_folio) && op_is_write(opf))
++	if (bh->b_folio && folio_test_dropbehind(bh->b_folio) &&
++	    op_is_write(opf))
+ 		bio_set_flag(bio, BIO_COMPLETE_IN_TASK);
+ 
+ 	if (IS_ENABLED(CONFIG_FS_ENCRYPTION))
+-- 
+2.39.3
+

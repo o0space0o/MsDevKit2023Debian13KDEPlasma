@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Install Google Chrome
+Comment=Download Google Chrome for ARM64 directly from Google
+Exec=/usr/local/bin/devkit2023customlinux-install-chrome
+TryExec=/usr/local/bin/devkit2023customlinux-install-chrome
+Icon=internet-web-browser
+Terminal=false
+OnlyShowIn=KDE;
+Categories=Network;WebBrowser;
+Keywords=browser;chrome;web;
+StartupNotify=true

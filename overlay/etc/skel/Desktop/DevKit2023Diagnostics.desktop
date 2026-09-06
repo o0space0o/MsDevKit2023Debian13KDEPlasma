@@ -1,0 +1,10 @@
+#!/usr/bin/xdg-open
+[Desktop Entry]
+Type=Application
+Name=DevKit2023CustomLinux Diagnostics
+Comment=Collect a read-only diagnostic report beside this launcher
+Icon=utilities-system-monitor
+Terminal=false
+StartupNotify=false
+Exec=python3 -B /usr/local/libexec/devkit2023customlinux-diagnostics --gui --launcher %k
+Categories=System;

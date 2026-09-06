@@ -1,0 +1,8 @@
+Repository: https://github.com/jglathe/alsa-ucm-conf.git
+Commit: 77b4b779ab42cc37ddd18052732aa4dc1e3fb37e
+Branch at retrieval: jg/blackrock-audio
+Files:
+  ucm2/Qualcomm/sc8280xp/Blackrock-HiFi.conf
+  ucm2/Qualcomm/sc8280xp/microsoft-blackrock.conf
+  ucm2/Qualcomm/sc8280xp/sc8280xp.conf
+License: BSD-3-Clause (see alsa-ucm-conf-LICENSE)

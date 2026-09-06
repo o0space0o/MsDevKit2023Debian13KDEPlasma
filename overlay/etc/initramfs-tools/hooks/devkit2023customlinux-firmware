@@ -1,0 +1,68 @@
+#!/bin/sh
+set -eu
+
+PREREQ=""
+
+prereqs() {
+    printf '%s\n' "$PREREQ"
+}
+
+case "${1:-}" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+# The live image deliberately blacklists these modules on its kernel command
+# line. After the prepared target has been validated, the init-premount helper
+# loads them from the initramfs so Qualcomm display/audio probing happens only
+# once, with the required firmware already present.
+manual_add_modules msm
+manual_add_modules qcom_q6v5_pas
+manual_add_modules snd_soc_sc8280xp
+
+# q6apm constructs this filename dynamically; modinfo cannot discover it.
+# Resolve the rootfs symlink and install a regular file at the exact request
+# path so ADSP/card registration can complete before the live root is mounted.
+topology=/usr/lib/firmware/qcom/sc8280xp/SC8280XP-MICROSOFT-BLACKROCK-tplg.bin
+copy_blackrock_topology() {
+    [ -s "$topology" ] || {
+        echo 'DevKit2023CustomLinux: required Blackrock audio topology is missing.' >&2
+        return 1
+    }
+    mkdir -p "${DESTDIR}$(dirname "$topology")"
+    cp -L "$topology" "${DESTDIR}${topology}"
+    chmod 0644 "${DESTDIR}${topology}"
+}
+copy_blackrock_topology
+
+firmware_directory=/usr/lib/firmware/qcom/sc8280xp/microsoft/blackrock
+provenance=/var/lib/devkit2023customlinux/windows-firmware-provenance.jsonl
+validator=/usr/local/libexec/devkit2023customlinux-validate-windows-driver
+payload_present=no
+for name in qcadsp8280.mbn qccdsp8280.mbn qcdxkmsuc8280.mbn; do
+    if [ -e "$firmware_directory/$name" ] || [ -L "$firmware_directory/$name" ]; then
+        payload_present=yes
+    fi
+done
+
+if [ "$payload_present" = no ]; then
+    exit 0
+fi
+if [ ! -x "$validator" ] || [ ! -f "$provenance" ] || [ -L "$provenance" ] ||
+   ! "$validator" --verify-provenance "$firmware_directory" "$provenance"; then
+    printf '%s\n' \
+        'DevKit2023CustomLinux: refusing to add unverified target firmware to initramfs.' >&2
+    exit 1
+fi
+
+for name in qcadsp8280.mbn qccdsp8280.mbn qcdxkmsuc8280.mbn; do
+    source="$firmware_directory/$name"
+    [ -f "$source" ] || continue
+    destination="${DESTDIR}${firmware_directory}/$name"
+    mkdir -p "$(dirname "$destination")"
+    cp -p "$source" "$destination"
+done

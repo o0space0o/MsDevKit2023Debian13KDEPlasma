@@ -1,0 +1,11 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Type=Application
+Name=Install DevKit2023CustomLinux
+Comment=Check installation readiness and Windows dual-boot requirements
+Exec=/usr/local/bin/devkit2023customlinux-installer
+TryExec=/usr/local/bin/devkit2023customlinux-installer
+Icon=system-software-install
+Terminal=false
+Categories=Qt;System;
+StartupNotify=true

@@ -1,0 +1,13 @@
+[Unit]
+Description=Apply this Dev Kit's prepared Bluetooth address
+Requires=devkit2023customlinux-prepared.service
+After=devkit2023customlinux-prepared.service systemd-rfkill.service
+Before=bluetooth.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/devkit2023customlinux-bluetooth-address
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

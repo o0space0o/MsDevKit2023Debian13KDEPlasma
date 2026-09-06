@@ -1,0 +1,58 @@
+#!/bin/bash
+set -Eeuo pipefail
+
+readonly expected_fingerprint=EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796
+readonly key_url=https://dl.google.com/linux/linux_signing_key.pub
+readonly repository='deb [arch=arm64 signed-by=/etc/apt/keyrings/google-chrome.asc] https://dl.google.com/linux/chrome/deb/ stable main'
+readonly key_target=/etc/apt/keyrings/google-chrome.asc
+readonly repository_target=/etc/apt/sources.list.d/google-chrome.list
+temporary_directory=
+
+cleanup() {
+    if [[ -n "$temporary_directory" && -d "$temporary_directory" ]]; then
+        rm -rf --one-file-system "$temporary_directory"
+    fi
+}
+trap cleanup EXIT
+
+[[ "${EUID:-$(id -u)}" -eq 0 ]] || exit 1
+[[ "$(dpkg --print-architecture)" == arm64 ]] || exit 1
+
+temporary_directory="$(mktemp -d /var/tmp/devkit2023customlinux-chrome.XXXXXX)"
+export GNUPGHOME="$temporary_directory/gnupg"
+install -d -m 0700 "$GNUPGHOME"
+key_download="$temporary_directory/google-linux-signing-key.pub"
+curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+    --proto-redir '=https' --connect-timeout 15 --max-time 120 \
+    "$key_url" --output "$key_download"
+
+gpg --batch --show-keys --with-colons "$key_download" |
+    awk -F: '$1 == "fpr" { print toupper($10) }' |
+    grep -Fxq "$expected_fingerprint"
+# Trust only the pinned Google primary key and its signing subkeys, not every
+# additional primary key that a downloaded key bundle might contain.
+gpg --batch --import-options import-minimal --import "$key_download"
+gpg --batch --armor --export "$expected_fingerprint" > "$temporary_directory/pinned-google-key.asc"
+[[ -s "$temporary_directory/pinned-google-key.asc" ]]
+
+install -d -m 0755 /etc/apt/keyrings /etc/apt/sources.list.d
+install -m 0644 "$temporary_directory/pinned-google-key.asc" "$key_target.new"
+printf '%s\n' "$repository" > "$repository_target.new"
+chmod 0644 "$repository_target.new"
+mv -f "$key_target.new" "$key_target"
+mv -f "$repository_target.new" "$repository_target"
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y --no-install-recommends google-chrome-stable:arm64
+
+[[ "$(dpkg-query -W -f='${Architecture}' google-chrome-stable)" == arm64 ]]
+[[ "$(dpkg-query -W -f='${Status}' google-chrome-stable)" == 'install ok installed' ]]
+# Preserve the scoped key even if the package's repository setup rewrites its
+# default source line during installation.
+printf '%s\n' "$repository" > "$repository_target.new"
+chmod 0644 "$repository_target.new"
+mv -f "$repository_target.new" "$repository_target"
+
+rm -f /usr/share/applications/install-google-chrome.desktop
+apt-get clean

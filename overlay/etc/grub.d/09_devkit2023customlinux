@@ -1,0 +1,29 @@
+#!/bin/sh
+# GRUB's library intentionally reads unset optional variables. Like upstream
+# generators, use errexit but not nounset when sourcing/calling that library.
+set -e
+
+. /usr/share/grub/grub-mkconfig_lib
+
+kernel="$(find /boot -maxdepth 1 -type f -name 'vmlinuz-*-devkit2023customlinux*' | sort -V | tail -n1)"
+[ -n "$kernel" ] || exit 0
+version="$(basename "$kernel" | sed 's/^vmlinuz-//')"
+initrd="/boot/initrd.img-$version"
+dtb="/boot/dtbs/$version/qcom/sc8280xp-microsoft-blackrock.dtb"
+[ -f "$initrd" ] && [ -f "$dtb" ] || exit 0
+
+root_device="${GRUB_DEVICE:-$(grub-probe --target=device /)}"
+boot_device="${GRUB_DEVICE_BOOT:-$(grub-probe --target=device /boot)}"
+root_uuid="$(grub-probe --device "$root_device" --target=fs_uuid)"
+kernel_rel="$(make_system_path_relative_to_its_root "$kernel")"
+initrd_rel="$(make_system_path_relative_to_its_root "$initrd")"
+dtb_rel="$(make_system_path_relative_to_its_root "$dtb")"
+
+cat <<EOF
+menuentry 'DevKit2023CustomLinux' --class debian --class gnu-linux {
+$(prepare_grub_to_access_device "$boot_device" | sed 's/^/\t/')
+	devicetree $dtb_rel
+	linux $kernel_rel root=UUID=$root_uuid ro rootwait clk_ignore_unused pd_ignore_unused ${GRUB_CMDLINE_LINUX:-} ${GRUB_CMDLINE_LINUX_DEFAULT:-quiet splash}
+	initrd $initrd_rel
+}
+EOF

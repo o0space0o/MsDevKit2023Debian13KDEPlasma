@@ -1,0 +1,14 @@
+[Unit]
+Description=Prepare the DevKit2023CustomLinux display
+Requires=devkit2023customlinux-prepared.service
+After=devkit2023customlinux-prepared.service systemd-udev-trigger.service
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/devkit2023customlinux-display-ready
+TimeoutStartSec=150
+RemainAfterExit=yes
+
+[Install]
+WantedBy=graphical.target

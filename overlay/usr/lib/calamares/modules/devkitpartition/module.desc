@@ -1,0 +1,5 @@
+---
+type: job
+name: devkitpartition
+interface: python
+script: main.py

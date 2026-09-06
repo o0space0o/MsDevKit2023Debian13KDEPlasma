@@ -1,0 +1,181 @@
+#!/usr/bin/python3
+"""Apply only this prepared kit's Windows Bluetooth address; no registry access."""
+import json
+import os
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+import time
+
+API = runpy.run_path('/usr/local/libexec/devkit2023customlinux-prepared')
+STATE = Path('/var/lib/devkit2023customlinux')
+READY = Path('/run/devkit2023customlinux/bluetooth-ready')
+
+
+class ControllerMismatch(ValueError):
+    pass
+
+
+def command(*args):
+    # BlueZ 5.82 attaches stdin to epoll even for a command on argv. systemd's
+    # /dev/null cannot be polled: attach fails and no management request is sent.
+    # An empty input string supplies a real pipe, not a terminal or /dev/null.
+    result = subprocess.run(args, input='', capture_output=True, text=True, timeout=8,
+                            env={**os.environ, 'LC_ALL': 'C', 'TERM': 'dumb'})
+    if result.returncode:
+        operation = args[3] if len(args) > 3 and args[1] == '--index' else args[1]
+        raise ValueError('Bluetooth ' + operation + ' command failed (exit ' + str(result.returncode) + ')')
+    if re.search(r'(?im)^(?:Reading .* failed|Too small|Unable to send|Invalid |.* failed with status)', result.stdout + result.stderr):
+        # BlueZ 5.82 can return exit zero for failed information requests.
+        raise ValueError('Bluetooth management reply reported an error')
+    return result.stdout
+
+
+def builtin_controller():
+    matches = []
+    for path in Path('/sys/class/bluetooth').glob('hci[0-9]*'):
+        node = (path / 'device').resolve()
+        for ancestor in (node, *node.parents):
+            compatible = ancestor / 'of_node/compatible'
+            if compatible.is_file() and b'qcom,wcn6855-bt' in compatible.read_bytes().split(b'\0'):
+                matches.append(path)
+                break
+    if len(matches) != 1:
+        raise ValueError('one built-in WCN6855 controller is required')
+    return matches[0]
+
+
+def field(lines, name):
+    matches = [match.group(1).strip() for line in lines
+               if (match := re.fullmatch(r'[ \t]*' + re.escape(name) + r':[ \t]*(.*)', line))]
+    if len(matches) != 1:
+        raise ValueError('Bluetooth reply has missing/ambiguous ' + name)
+    return matches[0]
+
+
+def needs_public_address(text, index):
+    # Global config enumerates unconfigured indices correctly. BlueZ 5.82's
+    # explicit-index config callback prints the wrong index; do not rely on it.
+    lines = text.splitlines()
+    counts = [int(m.group(1)) for line in lines if
+              (m := re.fullmatch(r'Unconfigured index list with ([0-9]+) items?', line))]
+    headers = [(i, m.group(1)) for i, line in enumerate(lines) if
+               (m := re.fullmatch(r'hci([0-9]+):[ \t]+Unconfigured controller', line))]
+    if len(counts) != 1 or counts[0] != len(headers) or len({h[1] for h in headers}) != len(headers):
+        raise ValueError('Bluetooth unconfigured-controller list is incomplete')
+    for position, (start, number) in enumerate(headers):
+        if number != index:
+            continue
+        end = headers[position + 1][0] if position + 1 < len(headers) else len(lines)
+        supported = field(lines[start:end], 'supported options').split()
+        missing = field(lines[start:end], 'missing options').split()
+        if missing != ['public-address'] or 'public-address' not in supported:
+            raise ValueError('Built-in Bluetooth needs unsupported/inconsistent configuration')
+        return True
+    return False
+
+
+def controller_address(text, index):
+    lines = text.splitlines()
+    headers = [line for line in lines if re.match(r'^hci[0-9]+:', line)]
+    expected = 'hci' + index
+    if not headers or not re.fullmatch(expected + r':[ \t]+Primary controller', headers[0]):
+        raise ValueError('Bluetooth controller information is incomplete or for another index')
+    addresses = [m.group(1).upper() for line in lines if
+                 (m := re.fullmatch(r'[ \t]*addr ((?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})'
+                                   r' version [0-9]+ manufacturer [0-9]+ class 0x[0-9a-fA-F]{6}', line))]
+    if len(addresses) != 1:
+        raise ValueError('Bluetooth controller address reply is missing or ambiguous')
+    supported = field(lines, 'supported settings').split()
+    field(lines, 'current settings')
+    if 'configuration' in supported:
+        if len(headers) != 2 or not re.fullmatch(expected + r':[ \t]+Configuration options', headers[1]):
+            raise ValueError('Bluetooth configuration reply is incomplete')
+        field(lines, 'supported options')
+        if field(lines, 'missing options'):
+            raise ValueError('Bluetooth configuration is not yet complete')
+    elif len(headers) != 1:
+        raise ValueError('Unexpected additional Bluetooth controller reply')
+    return API['address'](addresses[0])
+
+
+def configured(path, expected):
+    index = path.name.removeprefix('hci')
+    if not index.isdecimal():
+        raise ValueError('Invalid built-in Bluetooth index')
+    if needs_public_address(command('btmgmt', 'config'), index):
+        return False
+    actual = controller_address(command('btmgmt', '--index', index, 'info'), index)
+    if actual != expected:
+        raise ControllerMismatch('configured controller address differs from the prepared Windows target')
+    return True
+
+
+def unblock_controller(path):
+    # Do not change an unrelated USB radio's rfkill state.
+    radios = list(path.glob('rfkill[0-9]*'))
+    if len(radios) != 1 or not re.fullmatch(r'rfkill[0-9]+', radios[0].name):
+        raise ValueError('the built-in controller rfkill entry is unavailable or ambiguous')
+    command('rfkill', 'unblock', radios[0].name.removeprefix('rfkill'))
+
+
+def main():
+    if os.geteuid() != 0:
+        raise ValueError('root required')
+    data = json.loads((STATE / 'prepared-bundle/manifest.json').read_text(), object_pairs_hook=API['unique_json'])
+    API['require_target'](data)
+    expected = API['address'](data['bluetooth']['address'])
+    if not Path('/run/devkit2023customlinux/prepared-ready').is_file():
+        raise ValueError('prepared firmware service has not completed')
+    if sys.argv[1:] == ['--check-ready']:
+        path = builtin_controller()
+        if not READY.is_file() or not configured(path, expected):
+            raise ValueError('Bluetooth provisioning is not ready')
+        return
+    if sys.argv[1:]:
+        raise ValueError('unsupported arguments')
+    READY.unlink(missing_ok=True)
+    deadline = time.monotonic() + 85
+    last_error = 'Bluetooth controller did not appear'
+    while time.monotonic() < deadline:
+        try:
+            path = builtin_controller()
+            unblock_controller(path)
+            if not configured(path, expected):
+                index = path.name.removeprefix('hci')
+                # Only a positively identified unconfigured controller reaches
+                # here. It is already unpowered; Set Powered is unavailable for
+                # unconfigured controllers. Do not issue it before provisioning.
+                command('btmgmt', '--index', index, 'public-addr', expected)
+                time.sleep(1)
+                path = builtin_controller()
+                if not configured(path, expected):
+                    raise ValueError('controller did not accept its Windows public address')
+            for name, value in {
+                'bluetooth-address': expected,
+                'bluetooth-address-source': 'windows-device-address-cache',
+                'hardware-identity': data['binding']['value'],
+            }.items():
+                API['write_file'](STATE / name, (value + '\n').encode(), 0o600)
+            API['write_file'](READY, ('format=1\ncontroller=' + path.name + '\naddress=' + expected + '\n').encode(), 0o600)
+            print('Built-in Bluetooth address provisioned from this target preparation.')
+            return
+        except ControllerMismatch:
+            raise
+        except (ValueError, OSError, subprocess.SubprocessError) as exc:
+            detail = str(exc)
+            if detail != last_error:
+                print('Prepared Bluetooth: waiting: ' + detail, flush=True)
+            last_error = detail
+            time.sleep(1)
+    raise ValueError(last_error)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
+        print('Prepared Bluetooth: ' + str(error), file=sys.stderr)
+        raise SystemExit(1)

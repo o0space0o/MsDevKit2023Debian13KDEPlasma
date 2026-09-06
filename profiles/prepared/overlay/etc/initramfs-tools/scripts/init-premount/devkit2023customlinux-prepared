@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "${1:-}" in prereqs) prereqs; exit 0 ;; esac
+
+# Runs before live-boot searches for/mounts its backing filesystem. Firmware
+# is already in the initramfs; there is no Windows-volume or USB-cache import.
+fail() {
+    echo "DevKit2023CustomLinux: $*" >/dev/console
+    echo 'Prepared boot stopped. Record the error above; do not continue with missing drivers or mismatched target data.' >/dev/console
+    # A returning initramfs panic shell would let init continue after this script.
+    # Keep this stage stopped; never proceed to drivers on a mismatched target.
+    while :; do sleep 60; done
+}
+activate_driver() {
+    module="$1"
+    echo "DevKit2023CustomLinux: loading early driver $module" >/dev/console
+    # Debian initramfs exports MODPROBE_OPTIONS=-qb. Its -b also blacklists
+    # explicit module names and can return success without loading anything.
+    # Clear that inherited option for this deliberate, authenticated load only;
+    # keep the normal udev/kernel command-line autoload blacklist in place.
+    MODPROBE_OPTIONS= modprobe "$module" || fail "required driver $module failed to load"
+    test -d "/sys/module/$module" || fail "required driver $module is absent after the load command"
+}
+test -f /etc/devkit2023customlinux-prepared/target-binding ||
+    fail 'this is an unprepared base; run the Windows launcher with this target Dev Kit export first'
+tr '\0' '\n' < /proc/device-tree/compatible | grep -Fxq microsoft,blackrock ||
+    fail 'prepared image requires Windows Dev Kit 2023'
+test -r /sys/class/dmi/id/product_uuid || fail 'SMBIOS UUID is unavailable'
+uuid="$(tr '[:upper:]' '[:lower:]' < /sys/class/dmi/id/product_uuid)"
+token="$(printf 'DevKit2023CustomLinux target v1\nsmbios-uuid\n%s\n' "$uuid" | sha256sum)"
+token="${token%% *}"
+test "$token" = "$(cat /etc/devkit2023customlinux-prepared/target-binding)" ||
+    fail 'this ISO belongs to another Dev Kit; prepare this target in Windows'
+sha256sum -c /etc/devkit2023customlinux-prepared/firmware.sha256 >/dev/null ||
+    fail 'prepared firmware integrity check failed'
+for module in msm qcom_q6v5_pas snd_soc_sc8280xp; do
+    activate_driver "$module"
+done
+echo 'DevKit2023CustomLinux: early driver activation completed.' >/dev/console

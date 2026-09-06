@@ -1,0 +1,292 @@
+{
+  "schema": 1,
+  "components": [
+    {
+      "id": "overview",
+      "title": "Overview and maintenance",
+      "purpose": "Entry points, current evidence, source metadata and the connected project map.",
+      "status": "active documentation",
+      "dependsOn": [],
+      "files": [
+        ".gitattributes",
+        ".gitignore",
+        "AGENTS.md",
+        "BUILD-STATUS.md",
+        "LICENSE",
+        "README.md",
+        "SETUP.md",
+        "VERSION",
+        "config/project-map.json",
+        "docs/FILE-INDEX.md",
+        "docs/PREPARATION.md",
+        "docs/PROJECT-MAP.md",
+        "docs/VALIDATION.md",
+        "docs/WORKFLOW.md",
+        "CONTRIBUTING.md",
+        "SECURITY.md",
+        "docs/INSTALLATION.md",
+        "docs/UPSTREAM.md",
+        "docs/IMPLEMENTATION.md",
+        "docs/DevKit2023CustomLinux-Guide.pdf",
+        "scripts/build-guide.py"
+      ]
+    },
+    {
+      "id": "build",
+      "title": "Build coordination",
+      "purpose": "Native ARM64 build stages, dependencies, ISO-only publication and scoped temporary cleanup.",
+      "status": "native ARM64 builder; preparation required before boot",
+      "dependsOn": [
+        "kernel",
+        "image",
+        "verification"
+      ],
+      "files": [
+        ".github/workflows/build-iso.yml",
+        "build.sh",
+        "scripts/install-build-deps.sh",
+        "scripts/lib/common.sh",
+        "scripts/wsl-build-bootstrap.sh",
+        "scripts/clean-workspace.sh"
+      ]
+    },
+    {
+      "id": "windows",
+      "title": "Windows build host",
+      "purpose": "Windows entry points for generic builds, explicit target export and private ISO preparation.",
+      "status": "guided fresh Windows build and explicit target export; cleanup revision statically reviewed",
+      "dependsOn": [
+        "build"
+      ],
+      "files": [
+        "Start-DevKit2023CustomLinux.cmd",
+        "windows/DevKit.Common.ps1",
+        "windows/Build-DevKit2023CustomLinuxISO.ps1",
+        "windows/Export-DevKit2023Target.ps1",
+        "windows/Prepare-DevKit2023CustomLinux.ps1",
+        "windows/Setup-WSL.ps1",
+        "windows/Start-DevKit2023CustomLinux.ps1",
+        "windows/Clean-InterruptedBuilds.ps1"
+      ]
+    },
+    {
+      "id": "kernel",
+      "title": "Kernel and board",
+      "purpose": "Pinned linux-next source, three patch files/four commits and Blackrock kernel configuration.",
+      "status": "pinned owner-accepted 1.0.0 board baseline",
+      "dependsOn": [],
+      "files": [
+        "config/kernel/blackrock.config",
+        "patches/20250609-blackrock-usb0-mux-v1.mbox",
+        "patches/20260825-blackrock-dp-audio-altmode-v2.mbox",
+        "patches/20260902-buffer-fix-null-b-folio.mbox",
+        "scripts/build-kernel.sh"
+      ]
+    },
+    {
+      "id": "image",
+      "title": "Root filesystem and ISO",
+      "purpose": "Minimal Debian ARM64 package selection, overlay assembly, UEFI ISO and manifest.",
+      "status": "temporary target-free base before private target preparation",
+      "dependsOn": [
+        "kernel"
+      ],
+      "files": [
+        "scripts/build-iso.sh",
+        "scripts/build-rootfs.sh"
+      ]
+    },
+    {
+      "id": "boot",
+      "title": "Boot integration",
+      "purpose": "Live/installed GRUB, DTB install hook, initramfs permissions and firmware hook.",
+      "status": "prepared early-boot profile; reference kit boots KDE",
+      "dependsOn": [
+        "kernel",
+        "firmware"
+      ],
+      "files": [
+        "config/grub/embedded.cfg",
+        "config/grub/grub.cfg",
+        "overlay/etc/default/grub.d/10-devkit2023customlinux.cfg",
+        "overlay/etc/grub.d/09_devkit2023customlinux",
+        "overlay/etc/initramfs-tools/conf.d/initramfs-permissions",
+        "overlay/etc/initramfs-tools/hooks/devkit2023customlinux-firmware",
+        "overlay/etc/kernel/postinst.d/zz-devkit2023customlinux-dtb"
+      ]
+    },
+    {
+      "id": "firmware",
+      "title": "Firmware authentication",
+      "purpose": "Shared signed-catalog authentication for explicitly exported target firmware.",
+      "status": "no Linux-time Windows import or USB-cache fallback",
+      "dependsOn": [],
+      "files": [
+        "overlay/usr/local/libexec/devkit2023customlinux-validate-windows-driver"
+      ]
+    },
+    {
+      "id": "display_audio",
+      "title": "Display and audio",
+      "purpose": "Readiness helpers, service ordering, ALSA UCM routes and retained upstream license/source notices.",
+      "status": "reference miniDP and audible playback observed; full port matrix pending",
+      "dependsOn": [
+        "firmware"
+      ],
+      "files": [
+        "overlay/etc/systemd/system/display-manager.service.d/10-devkit2023customlinux-display.conf",
+        "overlay/usr/local/libexec/devkit2023customlinux-audio",
+        "overlay/usr/local/libexec/devkit2023customlinux-display-ready",
+        "overlay/usr/share/alsa/ucm2/Qualcomm/sc8280xp/Blackrock-HiFi.conf",
+        "overlay/usr/share/alsa/ucm2/Qualcomm/sc8280xp/microsoft-blackrock.conf",
+        "overlay/usr/share/alsa/ucm2/Qualcomm/sc8280xp/sc8280xp.conf",
+        "overlay/usr/share/doc/devkit2023customlinux/alsa-ucm-conf-LICENSE",
+        "overlay/usr/share/doc/devkit2023customlinux/alsa-ucm-conf-source"
+      ]
+    },
+    {
+      "id": "bluetooth",
+      "title": "Bluetooth identity and service ordering",
+      "purpose": "Built-in controller udev integration; target-bound provisioning belongs to the prepared component.",
+      "status": "observed connected on the reference kit",
+      "dependsOn": [
+        "firmware"
+      ],
+      "files": [
+        "overlay/etc/systemd/system/bluetooth.service.d/10-devkit2023customlinux-address.conf",
+        "overlay/etc/udev/rules.d/80-devkit2023customlinux-bluetooth.rules"
+      ]
+    },
+    {
+      "id": "installer",
+      "title": "Installer and target handover",
+      "purpose": "Calamares flow, live launcher, preflight and installed target-data transfer.",
+      "status": "enabled Windows-free-space-only installation; see documented evidence limits",
+      "dependsOn": [
+        "boot",
+        "display_audio",
+        "bluetooth"
+      ],
+      "files": [
+        "overlay/etc/calamares/branding/devkit2023customlinux/branding.desc",
+        "overlay/etc/calamares/branding/devkit2023customlinux/devkit2023customlinux-logo.svg",
+        "overlay/etc/calamares/modules/mount.conf",
+        "overlay/etc/calamares/modules/users.conf",
+        "overlay/etc/calamares/modules/packages.conf",
+        "overlay/etc/calamares/modules/shellprocess-check-mount.conf",
+        "overlay/etc/calamares/modules/shellprocess-finish.conf",
+        "overlay/etc/calamares/modules/shellprocess-cleanup.conf",
+        "overlay/etc/calamares/modules/shellprocess-target-data.conf",
+        "overlay/etc/calamares/modules/welcome.conf",
+        "overlay/etc/calamares/settings.conf",
+        "overlay/usr/local/bin/devkit2023customlinux-installer",
+        "overlay/usr/local/libexec/devkit2023customlinux-copy-target-data",
+        "overlay/usr/local/libexec/devkit2023customlinux-install-storage",
+        "overlay/usr/lib/devkit2023customlinux/install_policy.py",
+        "overlay/usr/lib/calamares/modules/devkitpartition/main.py",
+        "overlay/usr/lib/calamares/modules/devkitpartition/module.desc",
+        "overlay/usr/share/applications/install-devkit2023customlinux.desktop",
+        "overlay/etc/skel/Desktop/InstallDevKit2023CustomLinux.desktop"
+      ]
+    },
+    {
+      "id": "desktop",
+      "title": "Desktop, branding and optional Chrome",
+      "purpose": "Minimal KDE desktop, branding and user-triggered official ARM64 Chrome installation.",
+      "status": "three desktop launchers; Chrome is never bundled",
+      "dependsOn": [],
+      "files": [
+        "overlay/etc/issue",
+        "overlay/etc/issue.net",
+        "overlay/etc/live/config.conf.d/10-devkit2023customlinux.conf",
+        "overlay/etc/os-release",
+        "overlay/etc/sddm.conf.d/10-devkit2023customlinux.conf",
+        "overlay/etc/skel/.config/kdeglobals",
+        "overlay/etc/skel/.config/plasma-org.kde.plasma.desktop-appletsrc",
+        "overlay/etc/skel/.config/plasmarc",
+        "overlay/usr/local/bin/devkit2023customlinux-install-chrome",
+        "overlay/usr/local/libexec/devkit2023customlinux-install-chrome",
+        "overlay/usr/share/devkit2023customlinux/install-google-chrome.desktop",
+        "overlay/usr/share/wallpapers/DevKit2023CustomLinux/contents/images/3840x2160.svg",
+        "overlay/usr/share/wallpapers/DevKit2023CustomLinux/metadata.json",
+        "overlay/etc/skel/Desktop/InstallGoogleChrome.desktop"
+      ]
+    },
+    {
+      "id": "verification",
+      "title": "Source and artifact verification",
+      "purpose": "Inventory/privacy/link/syntax checks, synthetic tests and extracted ISO verification.",
+      "status": "active build-only tooling",
+      "dependsOn": [],
+      "files": [
+        "scripts/check-source.py",
+        "scripts/package-source.sh",
+        "scripts/verify-artifacts.sh",
+        "scripts/verify-prepared-iso.py",
+        "tests/test_build_layout.py",
+        "tests/test_windows_workflow.py",
+        "tests/windows-launcher-tests.ps1",
+        "tests/test_early_topology.py",
+        "tests/test_live_tester.py",
+        "tests/test_prepared_bundle.py",
+        "tests/test_prepared_early_driver.py",
+        "tests/test_prepared_runtime.py",
+        "tests/test_source_hygiene.py",
+        "tests/test_windows_driver_validator.py",
+        "scripts/verify-base.py",
+        "tests/test_desktop_delivery.py",
+        "tests/test_install_policy.py",
+        "tests/test_install_backend.py",
+        "tests/test_installer_startup.py",
+        "scripts/verify-installer-startup.py",
+        "tests/install-disk-image-test.py",
+        "tests/install-chroot-test.py",
+        "tests/install-user-vm-test.py",
+        ".github/workflows/source-check.yml"
+      ]
+    },
+    {
+      "id": "prepared",
+      "title": "Private Windows preparation",
+      "purpose": "Explicit target export, authenticated bundle selection, ISO repacking and early-boot target-bound firmware. Never an implicit builder-data fallback.",
+      "status": "one explicit-target Windows workflow; no persistent export/cache",
+      "dependsOn": [
+        "firmware",
+        "boot",
+        "bluetooth",
+        "image"
+      ],
+      "files": [
+        "profiles/prepared/overlay/etc/default/grub.d/20-devkit2023customlinux-prepared.cfg",
+        "profiles/prepared/overlay/etc/initramfs-tools/hooks/devkit2023customlinux-prepared",
+        "profiles/prepared/overlay/etc/initramfs-tools/scripts/init-premount/devkit2023customlinux-prepared",
+        "profiles/prepared/overlay/etc/systemd/system/devkit2023customlinux-audio.service",
+        "profiles/prepared/overlay/etc/systemd/system/devkit2023customlinux-bluetooth-address.service",
+        "profiles/prepared/overlay/etc/systemd/system/devkit2023customlinux-display-ready.service",
+        "profiles/prepared/overlay/etc/systemd/system/devkit2023customlinux-prepared.service",
+        "profiles/prepared/overlay/usr/local/libexec/devkit2023customlinux-bluetooth-address",
+        "profiles/prepared/overlay/usr/local/libexec/devkit2023customlinux-install-preflight",
+        "profiles/prepared/overlay/usr/local/libexec/devkit2023customlinux-prepared",
+        "scripts/install-preparation-deps.sh",
+        "scripts/prepare-iso.py"
+      ]
+    },
+    {
+      "id": "tester",
+      "title": "User diagnostics",
+      "purpose": "Permanent optional support utility: one desktop launcher, hidden implementation, native KDE progress/report viewer and redacted text output. No embedded target data.",
+      "status": "integrated in base and prepared profiles; hardware acceptance remains separate",
+      "dependsOn": [
+        "prepared",
+        "display_audio",
+        "bluetooth"
+      ],
+      "files": [
+        "docs/TESTER.md",
+        "scripts/package-diagnostics.py",
+        "overlay/etc/skel/Desktop/DevKit2023Diagnostics.desktop",
+        "overlay/usr/local/libexec/devkit2023customlinux-diagnostics"
+      ]
+    }
+  ]
+}

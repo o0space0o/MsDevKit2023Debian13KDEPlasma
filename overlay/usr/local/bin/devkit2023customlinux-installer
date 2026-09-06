@@ -1,0 +1,78 @@
+#!/bin/sh
+set -eu
+
+if ! grep -qw 'boot=live' /proc/cmdline; then
+    kdialog --title "DevKit2023CustomLinux" \
+        --error "The installer can only be started from the live USB."
+    exit 1
+fi
+
+runtime_dir="/run/user/$(id -u)"
+exec 9>"$runtime_dir/devkit2023customlinux-installer.lock"
+if ! flock -n 9; then
+    kdialog --title "Install DevKit2023CustomLinux" \
+        --sorry "The installer is already open. Check the taskbar for its window."
+    exit 0
+fi
+
+umask 077
+log_dir="$HOME/.local/state/devkit2023customlinux"
+mkdir -p "$log_dir"
+log_file="$(mktemp "$log_dir/installer-XXXXXXXX.log")"
+# The restrictive mask is for private logs, not the installed operating system.
+# Privileged helpers set explicit permissions on their own sensitive records.
+umask 022
+display_access=false
+cleanup() {
+    if [ "$display_access" = true ]; then
+        xhost -si:localuser:root >>"$log_file" 2>&1 || true
+    fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+failure() {
+    printf 'Installer startup failure: %s\n' "$1" >>"$log_file"
+    if kdialog --title "Install DevKit2023CustomLinux" \
+        --yes-label "Open log" --no-label "Close" --yesno "$1
+
+Startup log: $log_file
+Open the log now? Diagnostics can also create a shareable report.
+Do not retry blindly if disk changes had begun."; then
+        kdialog --title "DevKit2023CustomLinux installer log" --textbox "$log_file" 900 600 || true
+    fi
+    exit 1
+}
+
+preflight_error=/run/devkit2023customlinux/install-preflight-error
+# Only the human-readable summary crosses this pipe. The authoritative JSON
+# transaction stays root-only; never make it readable/writable by the desktop.
+if ! message="$(pkexec /usr/local/libexec/devkit2023customlinux-install-preflight 2>>"$log_file")"; then
+    if [ -r "$preflight_error" ]; then
+        message="$(cat "$preflight_error")"
+    else
+        message="The hardware preflight did not complete. No disk changes were made."
+    fi
+    failure "$message"
+fi
+
+if [ -z "$message" ]; then
+    failure "The installation summary was empty. No disk changes were started."
+fi
+
+kdialog --title "Install DevKit2023CustomLinux" \
+    --warningcontinuecancel "$message" || exit 0
+
+# The Debian wrapper discards Calamares's exit status during its final fstab
+# restore. Launch the packaged policy-authorized executable directly, preserving
+# its result. Our own partition job does not use or rename the live /etc/fstab.
+if [ -z "${DISPLAY:-}" ] || ! xhost +si:localuser:root >>"$log_file" 2>&1; then
+    failure "The installer could not connect to the desktop display. No disk changes were started."
+fi
+display_access=true
+status=0
+pkexec /usr/bin/calamares -platform xcb >>"$log_file" 2>&1 || status=$?
+if [ "$status" -ne 0 ]; then
+    failure "The installation window stopped unexpectedly (exit $status), or authorization was cancelled."
+fi

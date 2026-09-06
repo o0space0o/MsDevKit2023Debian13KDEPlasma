@@ -1,0 +1,11 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Type=Application
+Name=Install Google Chrome
+Comment=Install the official ARM64 browser from Google's signed repository
+Exec=/usr/local/bin/devkit2023customlinux-install-chrome
+TryExec=/usr/local/bin/devkit2023customlinux-install-chrome
+Icon=internet-web-browser
+Terminal=false
+Categories=Network;WebBrowser;
+StartupNotify=true

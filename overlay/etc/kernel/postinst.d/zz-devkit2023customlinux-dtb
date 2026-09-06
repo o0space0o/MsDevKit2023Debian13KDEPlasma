@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+version="$1"
+source="/usr/lib/linux-image-$version/qcom/sc8280xp-microsoft-blackrock.dtb"
+target="/boot/dtbs/$version/qcom/sc8280xp-microsoft-blackrock.dtb"
+
+if [ -f "$source" ]; then
+  mkdir -p "$(dirname "$target")"
+  cp -f "$source" "$target"
+fi

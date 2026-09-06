@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="3840" height="2160" viewBox="0 0 3840 2160">
+  <defs>
+    <radialGradient id="bg" cx="72%" cy="22%" r="95%">
+      <stop offset="0" stop-color="#243b53"/>
+      <stop offset=".48" stop-color="#101a26"/>
+      <stop offset="1" stop-color="#070b10"/>
+    </radialGradient>
+    <linearGradient id="rock" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#2b3038"/>
+      <stop offset="1" stop-color="#101318"/>
+    </linearGradient>
+  </defs>
+  <rect width="3840" height="2160" fill="url(#bg)"/>
+  <circle cx="2990" cy="440" r="560" fill="#54b9c9" opacity=".08"/>
+  <path d="M0 1770 620 1430 1060 1580 1640 1190 2220 1510 2740 1060 3380 1470 3840 1260 3840 2160 0 2160Z" fill="#0b1119" opacity=".86"/>
+  <path d="M1380 1680 1900 830 2380 1660 2190 2020 1530 2020Z" fill="url(#rock)"/>
+  <path d="M1900 830 2030 1600 2380 1660Z" fill="#3bc0d0" opacity=".18"/>
+  <text x="1920" y="1840" text-anchor="middle" font-family="sans-serif" font-size="68" font-weight="300" letter-spacing="10" fill="#e8f1f2">DEVKIT2023CUSTOMLINUX</text>
+  <text x="1920" y="1925" text-anchor="middle" font-family="sans-serif" font-size="32" letter-spacing="8" fill="#7fcbd5">CLEAN KDE PLASMA • ARM64</text>
+</svg>

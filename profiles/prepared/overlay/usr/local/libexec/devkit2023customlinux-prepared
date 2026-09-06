@@ -1,0 +1,183 @@
+#!/usr/bin/python3
+"""Authenticate private target bundles and activate preinstalled target firmware."""
+from __future__ import annotations
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import runpy
+import shutil
+import sys
+import uuid
+
+FIRMWARE = Path('/usr/lib/firmware/qcom/sc8280xp/microsoft/blackrock')
+STATE = Path('/var/lib/devkit2023customlinux')
+BUNDLE = STATE / 'prepared-bundle'
+ROOTS = Path('/usr/share/devkit2023customlinux/microsoft-driver-roots.pem')
+VALIDATOR = Path('/usr/local/libexec/devkit2023customlinux-validate-windows-driver')
+
+
+def target_token(raw: str) -> str:
+    value = uuid.UUID(raw.strip())
+    if value.int in (0, (1 << 128) - 1):
+        raise ValueError('SMBIOS UUID is unavailable')
+    text = 'DevKit2023CustomLinux target v1\nsmbios-uuid\n' + str(value) + '\n'
+    return hashlib.sha256(text.encode('ascii')).hexdigest()
+
+
+def address(raw: str) -> str:
+    if not isinstance(raw, str) or not re.fullmatch(r'(?:[0-9A-F]{2}:){5}[0-9A-F]{2}', raw):
+        raise ValueError('invalid canonical Bluetooth public address')
+    compact = raw.replace(':', '')
+    if compact in ('0' * 12, 'F' * 12) or int(compact[:2], 16) & 3:
+        raise ValueError('invalid public address')
+    return raw
+
+
+def unique_json(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate manifest key')
+        result[key] = value
+    return result
+
+
+def inspect_bundle(bundle: Path, rules: dict) -> dict:
+    if bundle.is_symlink() or not bundle.is_dir():
+        raise ValueError('invalid private bundle directory')
+    manifest = bundle / 'manifest.json'
+    if manifest.is_symlink() or not manifest.is_file() or manifest.stat().st_size > 65536:
+        raise ValueError('invalid private manifest')
+    data = json.loads(manifest.read_text(encoding='utf-8'), object_pairs_hook=unique_json)
+    if set(data) != {'format', 'model', 'binding', 'bluetooth', 'files'} or data['format'] != 1 or data['model'] != 'Windows Dev Kit 2023':
+        raise ValueError('unsupported private manifest')
+    binding = data['binding']
+    if set(binding) != {'kind', 'value'} or binding['kind'] != 'smbios-uuid-sha256-v1' or not re.fullmatch(r'[0-9a-f]{64}', binding['value']):
+        raise ValueError('unsupported target binding')
+    radio = data['bluetooth']
+    if set(radio) != {'source', 'address'} or radio['source'] != 'windows-device-address-cache':
+        raise ValueError('unsupported address source')
+    address(radio['address'])
+    files = data['files']
+    if not isinstance(files, dict) or not 9 <= len(files) <= 72:
+        raise ValueError('invalid bundle file count')
+    actual = set()
+    for path in bundle.rglob('*'):
+        if path.is_symlink():
+            raise ValueError('bundle contains a symbolic link')
+        if path.is_file() and path != manifest:
+            actual.add(path.relative_to(bundle).as_posix())
+    if actual != set(files):
+        raise ValueError('bundle inventory mismatch')
+    for relative, digest in files.items():
+        parts = relative.split('/')
+        if len(parts) != 3 or parts[0] != 'packages' or not re.fullmatch(r'[0-9a-f]{64}', digest):
+            raise ValueError('invalid bundle path/hash')
+        matching = [rule for name, rule in rules.items() if rule['directory'].fullmatch(parts[1]) and parts[2] in (name, rule['inf'], rule['catalog'])]
+        if len(matching) != 1:
+            raise ValueError('file outside firmware evidence allowlist')
+        path = bundle / relative
+        if path.stat().st_size > 32 * 1024 * 1024:
+            raise ValueError('oversized package file')
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise ValueError('bundle file hash mismatch')
+    return data
+
+
+def verify(bundle: Path, validator: Path = VALIDATOR, roots: Path = ROOTS, signer: Path | None = None):
+    api = runpy.run_path(str(validator))
+    if signer is not None:
+        api['validate_candidate'].__globals__['OSSLSIGNCODE'] = signer
+    data = inspect_bundle(bundle, api['RULES'])
+    selected = []
+    for name, rule in api['RULES'].items():
+        candidates = []
+        for relative in data['files']:
+            if relative.split('/')[-1] != name:
+                continue
+            path = bundle / relative
+            try:
+                rank, record = api['validate_candidate'](path, name, roots)
+            except (ValueError, OSError) as exc:
+                raise ValueError('a collected driver package failed authentication') from exc
+            candidates.append((rank, path, record))
+        if not candidates:
+            raise ValueError('required firmware package missing')
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        best = [item for item in candidates if item[0] == candidates[0][0]]
+        if len({item[2]['firmware_sha256'] for item in best}) != 1:
+            raise ValueError('ambiguous driver packages at the same version')
+        selected.append(best[0])
+    return data, selected
+
+
+def require_target(data: dict) -> None:
+    compatible = Path('/proc/device-tree/compatible').read_bytes().split(b'\0')
+    if b'microsoft,blackrock' not in compatible:
+        raise ValueError('this prepared image requires Windows Dev Kit 2023')
+    current = target_token(Path('/sys/class/dmi/id/product_uuid').read_text())
+    if current != data['binding']['value']:
+        raise ValueError('prepared image belongs to a different target; prepare this kit in Windows')
+
+
+def write_file(path: Path, content: bytes, mode: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + '.new')
+    if path.is_symlink() or temporary.exists() or temporary.is_symlink():
+        raise ValueError('unsafe or interrupted target state publication')
+    with temporary.open('xb') as stream:
+        os.fchmod(stream.fileno(), mode)
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(path)
+
+
+def activate() -> None:
+    if os.geteuid() != 0:
+        raise ValueError('root required')
+    data, selected = verify(BUNDLE)
+    require_target(data)
+    runtime = Path('/run/devkit2023customlinux/windows-firmware')
+    runtime.mkdir(parents=True, exist_ok=True)
+    records = []
+    for _rank, path, record in selected:
+        installed = FIRMWARE / record['firmware']
+        if installed.is_symlink() or hashlib.sha256(installed.read_bytes()).hexdigest() != record['firmware_sha256']:
+            raise ValueError('installed firmware differs from authenticated bundle')
+        write_file(runtime / record['firmware'], path.read_bytes(), 0o600)
+        records.append(record)
+    provenance = ''.join(json.dumps(record, sort_keys=True) + '\n' for record in records).encode()
+    write_file(runtime / 'provenance.jsonl', provenance, 0o600)
+    write_file(STATE / 'windows-firmware-provenance.jsonl', provenance, 0o600)
+    write_file(Path('/run/devkit2023customlinux/prepared-ready'), b'format=1\n', 0o644)
+    print('Prepared target firmware authenticated; no Windows volume was opened.')
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--verify', type=Path)
+    parser.add_argument('--validator', type=Path, default=VALIDATOR)
+    parser.add_argument('--roots', type=Path, default=ROOTS)
+    parser.add_argument('--signer', type=Path)
+    parser.add_argument('--activate', action='store_true')
+    args = parser.parse_args()
+    try:
+        if args.activate:
+            activate()
+        elif args.verify:
+            verify(args.verify, args.validator, args.roots, args.signer)
+            print('Private bundle authenticated: complete firmware set and target identity format.')
+        else:
+            parser.error('choose --verify or --activate')
+        return 0
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        print('Prepared firmware: ' + str(exc), file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

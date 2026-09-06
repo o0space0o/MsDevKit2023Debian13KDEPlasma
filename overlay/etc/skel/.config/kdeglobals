@@ -1,0 +1,14 @@
+[General]
+ColorScheme=BreezeDark
+Name=Breeze Dark
+
+[Icons]
+Theme=breeze-dark
+
+[KDE]
+LookAndFeelPackage=org.kde.breezedark.desktop
+SingleClick=false
+
+[WM]
+activeBackground=35,38,41
+activeForeground=239,240,241

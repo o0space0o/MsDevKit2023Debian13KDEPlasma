@@ -1,0 +1,413 @@
+#!/usr/bin/python3
+"""Privileged first-install backend. No Windows resize, erase, or recovery writes."""
+from __future__ import annotations
+import argparse
+import base64
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import runpy
+import stat
+import subprocess
+import sys
+import tempfile
+
+sys.path.insert(0, '/usr/lib/devkit2023customlinux')
+import install_policy as policy
+
+STATE = Path('/run/devkit2023customlinux')
+RECORD = STATE / 'install-plan.json'
+EFI_VARS = Path('/sys/firmware/efi/efivars')
+PREPARED = '/usr/local/libexec/devkit2023customlinux-prepared'
+HELPERS = Path('/usr/local/libexec')
+BOOT_ID = 'DevKit2023CustomLinux'
+ENV = {**os.environ, 'PATH': '/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin', 'LC_ALL': 'C'}
+
+
+def command(*args, input=None, timeout=120):
+    result = subprocess.run(list(args), input=input, text=True, capture_output=True,
+                            env=ENV, timeout=timeout, check=False)
+    if result.returncode:
+        raise ValueError(f'{Path(args[0]).name} failed: {result.stderr.strip()[:1000]}')
+    return result.stdout
+
+
+def save(record):
+    temporary = RECORD.with_suffix('.new')
+    with temporary.open('x', encoding='utf-8') as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        json.dump(record, stream, indent=2)
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(RECORD)
+
+
+def load():
+    info = RECORD.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
+        raise ValueError('Unsafe installation plan file')
+    data = json.loads(RECORD.read_text())
+    policy.validate_plan(data['plan'])
+    return data
+
+
+def hardware():
+    if 'boot=live' not in Path('/proc/cmdline').read_text().split():
+        raise ValueError('Start installation from the prepared live USB')
+    if 'efi=noruntime' in Path('/proc/cmdline').read_text().split():
+        raise ValueError('Reboot without efi=noruntime; installing the boot menu requires EFI runtime services')
+    api = runpy.run_path(PREPARED)
+    data, _ = api['verify'](api['BUNDLE'])
+    api['require_target'](data)
+    for marker in ('prepared-ready', 'display-ready', 'audio-ready', 'bluetooth-ready'):
+        if not (STATE / marker).is_file():
+            raise ValueError(f'Hardware readiness is missing: {marker}. Run Diagnostics first')
+    command(str(HELPERS / 'devkit2023customlinux-bluetooth-address'), '--check-ready')
+    command(str(HELPERS / 'devkit2023customlinux-display-ready'), '--check-ready')
+    command(str(HELPERS / 'devkit2023customlinux-audio'), '--check-ready')
+    secure = list(EFI_VARS.glob('SecureBoot-*'))
+    if len(secure) != 1 or secure[0].read_bytes()[4:] != b'\0':
+        raise ValueError('UEFI runtime services and Secure Boot disabled are required')
+    return data['binding']['value']
+
+
+def snapshot(disk):
+    command('sfdisk', '--verify', disk)
+    return json.loads(command('sfdisk', '--json', disk))
+
+
+def disk_identity(disk):
+    if not re.fullmatch(r'/dev/nvme[0-9]+n[0-9]+', disk):
+        raise ValueError('Only the internal NVMe Windows disk is supported')
+    info = os.stat(disk)
+    if not stat.S_ISBLK(info.st_mode):
+        raise ValueError('Target is not a block device')
+    sysdev = Path('/sys/class/block') / Path(disk).name
+    if (sysdev / 'removable').read_text().strip() != '0':
+        raise ValueError('Removable disks cannot be installation targets')
+    wwid = (sysdev / 'wwid').read_text().strip()
+    if not wwid:
+        raise ValueError('NVMe identity is unavailable')
+    return {'device': disk, 'rdev': info.st_rdev, 'wwid': wwid,
+            'size': (sysdev / 'size').read_text().strip()}
+
+
+def idle_disk(disk):
+    """Reject mounted, swapped, mapped, read-only or held target children."""
+    nodes = json.loads(command('lsblk', '--json', '--paths', '--output',
+                              'NAME,TYPE,RO,MOUNTPOINTS', disk))['blockdevices']
+    def inspect(node):
+        if node['ro'] or any(node.get('mountpoints') or []):
+            raise ValueError('The Windows disk is mounted, in use or read-only. Close disk/file tools and retry')
+        if node['type'] not in ('disk', 'part'):
+            raise ValueError('Mapped target disk is unsupported')
+        holders = Path('/sys/class/block') / Path(node['name']).name / 'holders'
+        if any(holders.iterdir()):
+            raise ValueError('The target disk has active holders')
+        for child in node.get('children', []):
+            inspect(child)
+    for node in nodes:
+        inspect(node)
+
+
+def tree_hash(folder):
+    result = {}
+    for path in sorted(folder.rglob('*')):
+        if path.is_symlink():
+            raise ValueError('Unexpected EFI symbolic link')
+        if path.is_file():
+            result[path.relative_to(folder).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return result
+
+
+def check_windows_efi(folder):
+    windows = folder / 'EFI/Microsoft/Boot/bootmgfw.efi'
+    data = windows.read_bytes()
+    if data[:2] != b'MZ' or len(data) < 64:
+        raise ValueError('Windows Boot Manager is missing or invalid')
+    offset = int.from_bytes(data[60:64], 'little')
+    if data[offset:offset + 6] != b'PE\0\0\x64\xaa':
+        raise ValueError('Windows Boot Manager is not ARM64')
+    if (folder / ('EFI/' + BOOT_ID)).exists():
+        raise ValueError('A previous DevKit2023CustomLinux installation is present; overwrite is not supported')
+    space = os.statvfs(folder)
+    if space.f_bavail * space.f_frsize < 32 * 1024**2:
+        raise ValueError('EFI partition needs at least 32 MiB of free space')
+    return tree_hash(folder)
+
+
+def efi_inventory(efi):
+    folder = Path(tempfile.mkdtemp(prefix='devkit-efi-', dir=STATE))
+    try:
+        command('mount', '-t', 'vfat', '-o', 'ro,nosuid,nodev,noexec', efi, str(folder))
+        return check_windows_efi(folder)
+    finally:
+        if os.path.ismount(folder):
+            command('umount', str(folder))
+        folder.rmdir()
+
+
+def boot_variables():
+    values = {}
+    for path in EFI_VARS.iterdir():
+        if re.fullmatch(r'Boot(?:[0-9A-Fa-f]{4}|Order)-8be4df61-93ca-11d2-aa0d-00e098032b8c', path.name):
+            values[path.name] = base64.b64encode(path.read_bytes()).decode('ascii')
+    order = next((v for k, v in values.items() if k.startswith('BootOrder-')), None)
+    if not order or len(base64.b64decode(order)) < 6 or len(base64.b64decode(order)) % 2:
+        raise ValueError('Existing UEFI boot order cannot be read')
+    listing = command('efibootmgr', '-v')
+    if 'Windows Boot Manager' not in listing or BOOT_ID in listing:
+        raise ValueError('Expected an existing Windows Boot Manager and no previous Linux entry')
+    return values
+
+
+def register_boot_entry(record):
+    """Add one entry without replacing any old Boot####, including Windows."""
+    if boot_variables() != record['boot_variables']:
+        raise ValueError('UEFI entries changed before Linux registration')
+    command('efibootmgr', '--create-only', '--disk', record['identity']['device'], '--part',
+            record['plan']['efi']['node'].rsplit('p', 1)[1], '--label', BOOT_ID,
+            '--loader', '\\EFI\\' + BOOT_ID + '\\grubaa64.efi')
+    now = {p.name: base64.b64encode(p.read_bytes()).decode('ascii') for p in EFI_VARS.iterdir()
+           if re.fullmatch(r'Boot(?:[0-9A-Fa-f]{4}|Order)-8be4df61-93ca-11d2-aa0d-00e098032b8c', p.name)}
+    if any(now.get(name) != value for name, value in record['boot_variables'].items()):
+        raise ValueError('Existing UEFI boot variables changed unexpectedly')
+    added = now.keys() - record['boot_variables'].keys()
+    if len(added) != 1:
+        raise ValueError('Could not identify the new Linux boot entry')
+    number = next(iter(added))[4:8]
+    if not re.fullmatch(r'[A-Fa-f0-9]{4}', number):
+        raise ValueError('Unexpected new boot variable')
+    order_name = next(k for k in record['boot_variables'] if k.startswith('BootOrder-'))
+    old_order = base64.b64decode(record['boot_variables'][order_name])[4:]
+    order = [f'{int.from_bytes(old_order[i:i+2], "little"):04X}' for i in range(0, len(old_order), 2)]
+    if number.upper() in order:
+        raise ValueError('Linux boot number collides with the original order')
+    command('efibootmgr', '--bootorder', ','.join([number] + order))
+    if (EFI_VARS / order_name).read_bytes()[4:] != int(number, 16).to_bytes(2, 'little') + old_order:
+        raise ValueError('The new boot order could not be verified')
+    for name, value in record['boot_variables'].items():
+        if not name.startswith('BootOrder-') and base64.b64encode((EFI_VARS / name).read_bytes()).decode('ascii') != value:
+            raise ValueError('An original boot entry changed')
+
+
+def present_plan(planned):
+    summary = policy.describe(planned)
+    # Calamares's privileged summary page uses this private copy. The desktop
+    # launcher receives stdout, never reads this cache, and cannot alter it.
+    with (STATE / 'install-plan.txt').open('w', encoding='utf-8') as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        stream.write(summary + '\n')
+    print(summary)
+
+
+def capture():
+    binding = hardware()
+    if RECORD.exists() and load()['phase'] != 'planned':
+        raise ValueError('An installation already started in this live session. Do not retry or reformat; inspect its report')
+    if RECORD.exists():
+        # A second launcher cannot substitute a new plan behind an open wizard.
+        record = load()
+        disk = current(record)
+        policy.check_before(record['plan'], snapshot(disk))
+        if efi_inventory(record['plan']['efi']['node']) != record['efi_files'] or boot_variables() != record['boot_variables']:
+            raise ValueError('The original plan is stale. Close the installer and reboot the live USB to plan again')
+        present_plan(record['plan'])
+        return
+    disks = sorted('/dev/' + p.name for p in Path('/sys/class/block').glob('nvme*n*')
+                   if re.fullmatch(r'nvme[0-9]+n[0-9]+', p.name))
+    if len(disks) != 1:
+        raise ValueError('Exactly one internal NVMe disk is required; ambiguous disk selection is refused')
+    disk = disks[0]
+    identity = disk_identity(disk)
+    idle_disk(disk)
+    planned = policy.plan(snapshot(disk))
+    inventory = efi_inventory(planned['efi']['node'])
+    variables = boot_variables()
+    record = {'plan': planned, 'identity': identity, 'binding': binding, 'phase': 'planned',
+              'efi_files': inventory, 'boot_variables': variables,
+              'boot_id': Path('/proc/sys/kernel/random/boot_id').read_text().strip()}
+    save(record)
+    present_plan(planned)
+
+
+def current(record, mounted=False):
+    if hardware() != record['binding'] or Path('/proc/sys/kernel/random/boot_id').read_text().strip() != record['boot_id']:
+        raise ValueError('Prepared target/session changed')
+    disk = record['plan']['before']['device']
+    if disk_identity(disk) != record['identity']:
+        raise ValueError('Target disk identity changed')
+    if not mounted:
+        idle_disk(disk)
+    return disk
+
+
+def apply():
+    record = load()
+    if record['phase'] != 'planned':
+        raise ValueError('This plan has already been used; formatting will not be repeated')
+    disk = current(record)
+    policy.check_before(record['plan'], snapshot(disk))
+    if efi_inventory(record['plan']['efi']['node']) != record['efi_files'] or boot_variables() != record['boot_variables']:
+        raise ValueError('Windows EFI state changed after the plan was shown')
+    # Recheck after read-only EFI inspection and immediately before sfdisk.
+    idle_disk(disk)
+    policy.check_before(record['plan'], snapshot(disk))
+    record['phase'] = 'partition-write-started'
+    save(record)
+    command('sfdisk', '--append', '--lock=yes', '--wipe=never', '--wipe-partitions=never',
+            disk, input=policy.sfdisk_input(record['plan']))
+    command('udevadm', 'settle', '--timeout=20')
+    policy.check_after(record['plan'], snapshot(disk))
+    root = record['plan']['root']
+    verify_partition_node(root, record['plan']['before']['sectorsize'])
+    idle_disk(disk)
+    # mkfs never receives an original partition, and no force option is allowed.
+    command('mkfs.ext4', '-q', '-L', BOOT_ID[:16], root['node'], timeout=300)
+    record['phase'] = 'formatted'
+    record['root_fs_uuid'] = command('blkid', '-s', 'UUID', '-o', 'value', root['node']).strip()
+    record['efi_fs_uuid'] = command('blkid', '-s', 'UUID', '-o', 'value', record['plan']['efi']['node']).strip()
+    if not re.fullmatch(r'[0-9a-f-]{36}', record['root_fs_uuid']) or not re.fullmatch(r'[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}', record['efi_fs_uuid']):
+        raise ValueError('Filesystem identity could not be verified')
+    save(record)
+    print(json.dumps({'partitions': [
+        {'device': root['node'], 'mountPoint': '/', 'fs': 'ext4', 'uuid': record['root_fs_uuid']},
+        {'device': record['plan']['efi']['node'], 'mountPoint': '/boot/efi', 'fs': 'fat32', 'uuid': record['efi_fs_uuid']}]}))
+
+
+def verify_partition_node(part, sector):
+    node = Path(part['node'])
+    if not stat.S_ISBLK(node.stat().st_mode):
+        raise ValueError('New root is not a block partition')
+    sysdev = Path('/sys/class/block') / node.name
+    # sysfs start and size always use 512-byte units, including 4Kn disks.
+    if int((sysdev / 'start').read_text()) * 512 != part['start'] * sector or int((sysdev / 'size').read_text()) * 512 != part['size'] * sector:
+        raise ValueError('Kernel partition mapping differs from the verified GPT')
+    if command('blkid', '-s', 'PARTUUID', '-o', 'value', str(node)).strip().lower() != part['uuid'].lower():
+        raise ValueError('Kernel partition UUID differs from the verified GPT')
+
+
+def mounted_root(target):
+    record = load()
+    if record['phase'] not in ('formatted', 'finishing'):
+        raise ValueError('A newly formatted confirmed root is required')
+    current(record, mounted=True)
+    target = Path(target)
+    if not re.fullmatch(r'/tmp/calamares-root-[A-Za-z0-9_-]+', str(target)) or target.is_symlink():
+        raise ValueError('Unexpected installation mount directory')
+    for folder, part in ((target, record['plan']['root']), (target / 'boot/efi', record['plan']['efi'])):
+        mounted = json.loads(command('findmnt', '--json', '--mountpoint', str(folder), '--output', 'SOURCE,TARGET'))['filesystems']
+        if len(mounted) != 1 or mounted[0]['target'] != str(folder) or os.stat(mounted[0]['source']).st_rdev != os.stat(part['node']).st_rdev:
+            raise ValueError('Installation mount does not refer to the confirmed partition')
+    policy.check_after(record['plan'], snapshot(record['identity']['device']))
+    return record, target
+
+
+def finish(target):
+    record, target = mounted_root(target)
+    efi = target / 'boot/efi'
+    if tree_hash(efi) != record['efi_files'] or boot_variables() != record['boot_variables']:
+        raise ValueError('Original EFI files or entries changed during installation')
+    # Verify installed private target evidence survived unpacking and cleanup.
+    api = runpy.run_path(PREPARED)
+    data, _ = api['verify'](target / 'var/lib/devkit2023customlinux/prepared-bundle')
+    api['require_target'](data)
+    for relative in ('target-binding', 'firmware.sha256'):
+        if (target / 'etc/devkit2023customlinux-prepared' / relative).read_bytes() != (Path('/etc/devkit2023customlinux-prepared') / relative).read_bytes():
+            raise ValueError('Installed early firmware record differs from the live target')
+    kernels = sorted((target / 'boot').glob('vmlinuz-*-devkit2023customlinux*'))
+    if len(kernels) != 1:
+        raise ValueError('Expected exactly the tested custom kernel')
+    version = kernels[0].name.removeprefix('vmlinuz-')
+    if kernels[0].read_bytes() != (Path('/boot') / kernels[0].name).read_bytes():
+        raise ValueError('Installed kernel differs from the working live kernel')
+    dtb = target / f'boot/dtbs/{version}/qcom/sc8280xp-microsoft-blackrock.dtb'
+    if not dtb.is_file():
+        raise ValueError('Blackrock device tree is missing')
+    contents = command('lsinitramfs', str(target / f'boot/initrd.img-{version}'), timeout=120)
+    for required in ('etc/devkit2023customlinux-prepared/target-binding',
+                     'etc/devkit2023customlinux-prepared/firmware.sha256',
+                     'scripts/init-premount/devkit2023customlinux-prepared', 'msm.ko', 'qcom_q6v5_pas.ko'):
+        if required not in contents:
+            raise ValueError('Installed initramfs is missing ' + required)
+    record['phase'] = 'finishing'
+    save(record)
+    # Do not run os-prober or modify any Microsoft/fallback loader.
+    windows_entry = target / 'etc/grub.d/40_devkit2023customlinux_windows'
+    windows_entry.write_text('#!/bin/sh\nexec tail -n +3 "$0"\n'
+        'menuentry "Windows Boot Manager" --class windows {\n'
+        '    insmod part_gpt\n    insmod fat\n    insmod chain\n'
+        f'    search --no-floppy --fs-uuid --set=root {record["efi_fs_uuid"]}\n'
+        '    chainloader /EFI/Microsoft/Boot/bootmgfw.efi\n}\n')
+    windows_entry.chmod(0o755)
+    (target / 'boot/grub').mkdir(parents=True, exist_ok=True)
+    command('chroot', str(target), 'grub-mkconfig', '-o', '/boot/grub/grub.cfg')
+    grub = (target / 'boot/grub/grub.cfg').read_text()
+    for required in ('DevKit2023CustomLinux', 'Windows Boot Manager', 'clk_ignore_unused', 'pd_ignore_unused', 'devicetree'):
+        if required not in grub:
+            raise ValueError('Installed GRUB configuration is missing ' + required)
+    if 'efi=noruntime' in grub or 'boot=live' in grub:
+        raise ValueError('Live-only kernel parameters in installed GRUB')
+    command('chroot', str(target), 'grub-script-check', '/boot/grub/grub.cfg')
+    command('chroot', str(target), 'grub-install', '--target=arm64-efi', '--efi-directory=/boot/efi',
+            '--bootloader-id=' + BOOT_ID, '--no-nvram', '--no-uefi-secure-boot')
+    command('grub-file', '--is-arm64-efi', str(efi / 'EFI' / BOOT_ID / 'grubaa64.efi'))
+    updated = tree_hash(efi)
+    if any(updated.get(name) != digest for name, digest in record['efi_files'].items()) or any(
+            not name.startswith('EFI/' + BOOT_ID + '/') for name in updated.keys() - record['efi_files'].keys()):
+        raise ValueError('Unexpected EFI file change; retain the installation report')
+    register_boot_entry(record)
+    policy.check_after(record['plan'], snapshot(record['identity']['device']))
+    record['phase'] = 'complete'
+    save(record)
+    evidence = target / 'var/lib/devkit2023customlinux/installation.json'
+    evidence.write_text(json.dumps(record, indent=2) + '\n')
+    evidence.chmod(0o600)
+    for relative in ('usr/local/libexec/devkit2023customlinux-install-storage',
+                     'usr/local/libexec/devkit2023customlinux-install-preflight',
+                     'usr/local/libexec/devkit2023customlinux-copy-target-data',
+                     'usr/lib/devkit2023customlinux/install_policy.py',
+                     'usr/lib/calamares/modules/devkitpartition/main.py',
+                     'usr/lib/calamares/modules/devkitpartition/module.desc'):
+        (target / relative).unlink(missing_ok=True)
+    module_directory = target / 'usr/lib/calamares/modules/devkitpartition'
+    if module_directory.is_dir() and not any(module_directory.iterdir()):
+        module_directory.rmdir()
+    command('sync')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=('capture', 'apply', 'check-mount', 'finish'))
+    parser.add_argument('target', nargs='?')
+    args = parser.parse_args()
+    if os.geteuid() != 0:
+        raise ValueError('Administrator authorization is required')
+    STATE.mkdir(mode=0o755, exist_ok=True)
+    info = STATE.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        raise ValueError('Unsafe runtime directory')
+    with (STATE / 'install.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if args.action == 'capture':
+            capture()
+        elif args.action == 'apply':
+            apply()
+        elif args.action == 'check-mount':
+            mounted_root(args.target)
+        else:
+            finish(args.target)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        message = 'Installation stopped: ' + str(error)
+        print(message, file=sys.stderr)
+        if os.geteuid() == 0 and STATE.is_dir():
+            (STATE / 'install-preflight-error').write_text(message + '\n')
+        sys.exit(1)
