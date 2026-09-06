@@ -16,8 +16,9 @@ function Assert-DevKitPlainPath {
     param([Parameter(Mandatory)][string]$Path)
     $cursor = [IO.Path]::GetFullPath($Path)
     while ($cursor) {
+        # AppData and other hidden ancestors still need the reparse-point check.
         if ((Test-Path -LiteralPath $cursor) -and
-            ((Get-Item -LiteralPath $cursor).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            ((Get-Item -LiteralPath $cursor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             throw 'Linked/reparse-point output paths are not accepted.'
         }
         $cursor = Split-Path -Parent $cursor

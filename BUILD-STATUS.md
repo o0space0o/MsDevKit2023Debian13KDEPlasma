@@ -59,6 +59,23 @@ ISO directory is ignored. PDF files are marked binary so Git cannot rewrite
 their line endings; executable scripts retain their executable mode. The
 publication regression assertion was added without running another test suite.
 
+## Windows launcher CI correction
+
+After publication, the owner requested correction of the Windows-launcher CI
+failure. The path guard now uses Get-Item -Force to inspect hidden ancestors
+such as AppData; it still rejects reparse points and does not bypass permissions.
+
+A synthetic hidden-folder regression reproduced the original failure before
+the fix. After the fix, all 37 Windows-launcher checks passed locally in both
+Windows PowerShell 5.1 and PowerShell 7. The coverage includes existing hidden
+folders, existing/missing children, and rejection of a simulated hidden reparse
+ancestor. All 176 Python tests, source/privacy/link/shell checks and PowerShell
+syntax parsing also passed for this correction.
+
+Only the Windows helper, its regression tests and this status record changed.
+No ISO rebuild, hardware/QEMU test, firmware collection or installation ran.
+The preserved working ISO and the guide remain unchanged.
+
 ## Frozen board baseline
 
 - Kernel: next-20260902, commit 32b6ef9a5d0eca44f9cd91f52f4faa89f145a0de.

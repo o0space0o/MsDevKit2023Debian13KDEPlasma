@@ -68,6 +68,29 @@ if ((Split-Path -Parent $fixture) -ne $tempParent -or (Test-Path -LiteralPath $f
 Assert-DevKitPlainPath $fixture
 New-Item -ItemType Directory -Path $fixture | Out-Null
 try {
+    # Hidden ancestors such as AppData must work on Windows PowerShell 5.1 too.
+    # Set attributes only on this synthetic child, never on the real user profile.
+    $hiddenParent = Join-Path $fixture 'hidden-parent'
+    New-Item -ItemType Directory -Path $hiddenParent | Out-Null
+    $hiddenItem = Get-Item -LiteralPath $hiddenParent -Force
+    $hiddenItem.Attributes = $hiddenItem.Attributes -bor [IO.FileAttributes]::Hidden
+    Assert-Equal ([bool]((Get-Item -LiteralPath $hiddenParent -Force).Attributes -band [IO.FileAttributes]::Hidden)) $true 'Hidden fixture attribute'
+    Assert-Equal (Assert-DevKitPlainPath $hiddenParent) $null 'Existing hidden folder'
+    Assert-Equal (Assert-DevKitPlainPath (Join-Path $hiddenParent 'not-created-yet')) $null 'Missing child under hidden ancestor'
+    $visibleChild = Join-Path $hiddenParent 'visible-child'
+    New-Item -ItemType Directory -Path $visibleChild | Out-Null
+    Assert-Equal (Assert-DevKitPlainPath $visibleChild) $null 'Existing child under hidden ancestor'
+    & {
+        # Simulate a hidden reparse point without creating links or requiring admin.
+        function Get-Item {
+            param([string]$LiteralPath,[switch]$Force)
+            if ($LiteralPath -eq $hiddenParent) {
+                return [pscustomobject]@{Attributes=([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::Hidden -bor [IO.FileAttributes]::ReparsePoint)}
+            }
+            Microsoft.PowerShell.Management\Get-Item @PSBoundParameters
+        }
+        Assert-Rejected { Assert-DevKitPlainPath $visibleChild } 'Hidden reparse ancestor remains refused'
+    }
     $iso = Join-Path $fixture 'synthetic.iso'
     $manifestPath = Join-Path $fixture 'build-manifest.json'
     [IO.File]::WriteAllText($iso,'Synthetic fixture; not an actual ISO or device record.')
